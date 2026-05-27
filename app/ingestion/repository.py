@@ -8,6 +8,7 @@ from typing import Any, Iterable
 from psycopg.rows import dict_row
 
 from db.connection import get_connection
+from ingestion.book_structure import BookChapter, BookStructure, ChapterResolver
 from ingestion.embedding_service import EmbeddingRecord
 
 logger = logging.getLogger(__name__)
@@ -88,14 +89,20 @@ class RagRepository:
 
     def upsert_document(self, document: dict[str, Any]) -> str:
         columns = [
-            "title", "normalized_title", "subject", "grade", "board", "medium", "language", "detected_language",
+            "title", "book_title", "normalized_title", "school_name", "class_name", "subject", "grade",
+            "board", "medium", "language", "detected_language", "primary_language", "languages_detected",
             "publisher", "edition", "publication_year", "isbn", "author", "source_type", "source_uri", "file_name",
             "file_path", "file_hash", "file_size_bytes", "mime_type", "total_pages", "total_words", "total_tokens",
-            "extraction_status", "copyright_status", "license_notes", "metadata",
+            "extraction_status", "copyright_status", "license_notes", "llm_metadata_model", "llm_metadata_confidence",
+            "structure_detected_by", "content_profile", "chunking_strategy", "chunk_max_tokens", "chunk_overlap_tokens", "metadata",
         ]
-        values = [document.get(c) for c in columns]
-        values[-1] = _json(values[-1] or {})
-        placeholders = ", ".join(["%s"] * (len(columns) - 1) + ["%s::jsonb"])
+        values = []
+        for col in columns:
+            if col in {"metadata", "languages_detected"}:
+                values.append(_json(document.get(col) or ([] if col == "languages_detected" else {})))
+            else:
+                values.append(document.get(col))
+        placeholders = ", ".join(["%s::jsonb" if c in {"metadata", "languages_detected"} else "%s" for c in columns])
         update_clause = ", ".join(f"{c}=EXCLUDED.{c}" for c in columns if c != "file_hash")
         with get_connection(self.database_url) as conn, conn.transaction():
             row = conn.execute(
@@ -108,6 +115,44 @@ class RagRepository:
                 values,
             ).fetchone()
             return str(row[0])
+
+    def insert_book_chapters(self, document_id: str, chapters: list[BookChapter]) -> None:
+        if not chapters:
+            return
+        sql = """
+        INSERT INTO embeddings_book_chapters(
+            document_id, chapter_number, chapter_title, printed_start_page, printed_end_page,
+            pdf_start_page, pdf_end_page, detected_by, confidence, metadata
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+        ON CONFLICT(document_id, chapter_number, chapter_title) DO UPDATE SET
+            printed_start_page=EXCLUDED.printed_start_page,
+            printed_end_page=EXCLUDED.printed_end_page,
+            pdf_start_page=EXCLUDED.pdf_start_page,
+            pdf_end_page=EXCLUDED.pdf_end_page,
+            detected_by=EXCLUDED.detected_by,
+            confidence=EXCLUDED.confidence,
+            metadata=EXCLUDED.metadata,
+            updated_at=now()
+        """
+        params = [
+            (
+                document_id,
+                c.chapter_number,
+                c.chapter_title,
+                c.printed_start_page,
+                c.printed_end_page,
+                c.pdf_start_page,
+                c.pdf_end_page,
+                c.detected_by,
+                c.confidence,
+                _json(c.metadata or {}),
+            )
+            for c in chapters
+            if c.chapter_title
+        ]
+        with get_connection(self.database_url) as conn, conn.transaction():
+            with conn.cursor() as cur:
+                cur.executemany(sql, params)
 
     def insert_pages(self, document_id: str, pages: list[dict[str, Any]]) -> None:
         sql = """
@@ -148,8 +193,9 @@ class RagRepository:
 
     def insert_chunks(self, document_id: str, chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         columns = [
-            "document_id", "page_start", "page_end", "chunk_index", "book_title", "subject", "grade", "board",
-            "medium", "language", "detected_language", "chapter_number", "chapter_title", "unit_title", "lesson_title",
+            "document_id", "page_start", "page_end", "chunk_index", "book_title", "school_name", "class_name",
+            "subject", "grade", "board", "medium", "language", "detected_language", "chapter_number",
+            "chapter_title", "unit_title", "lesson_title",
             "section_title", "subsection_title", "topic", "subtopic", "chunk_type", "content_domain", "difficulty_level",
             "pedagogical_role", "content", "content_clean", "content_for_embedding", "summary", "keywords", "important_terms",
             "formulas", "numbers", "question_types", "word_count", "token_count", "char_count", "has_formula",
@@ -184,6 +230,100 @@ class RagRepository:
                 enriched.append(item)
         return enriched
 
+    def insert_raw_text_pages(
+        self,
+        document_id: str,
+        pages: list[dict[str, Any]],
+        chunks: list[dict[str, Any]],
+        metadata: dict[str, Any],
+        book_structure: BookStructure | None = None,
+    ) -> None:
+        """Store raw page text with book/school/chapter metadata for later reference.
+
+        embeddings_pages is kept as the extraction table. This table is a more
+        convenient raw-reference table because it repeats the school/class/book
+        metadata and adds the best-known chapter for each page.
+        """
+        if not pages:
+            return
+
+        resolver = ChapterResolver(book_structure.chapters) if book_structure else None
+
+        def chapter_for_page(page_number: int) -> dict[str, Any]:
+            if resolver:
+                resolved = resolver.chapter_for_pdf_page(page_number)
+                if resolved:
+                    return resolved.to_dict()
+            matching = [
+                c for c in chunks
+                if int(c.get("page_start") or 0) <= page_number <= int(c.get("page_end") or 0)
+            ]
+            # Prefer a chunk with chapter info, then any chunk covering the page.
+            matching.sort(key=lambda c: 0 if c.get("chapter_title") else 1)
+            if matching:
+                return matching[0]
+            return {}
+
+        sql = """
+        INSERT INTO embeddings_raw_text_pages(
+            document_id, school_name, class_name, grade, subject, book_title,
+            chapter_number, chapter_title, page_number, printed_page_number, raw_text, cleaned_text,
+            detected_language, word_count, token_count, metadata
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb
+        )
+        ON CONFLICT(document_id, page_number) DO UPDATE SET
+            school_name=EXCLUDED.school_name,
+            class_name=EXCLUDED.class_name,
+            grade=EXCLUDED.grade,
+            subject=EXCLUDED.subject,
+            book_title=EXCLUDED.book_title,
+            chapter_number=EXCLUDED.chapter_number,
+            chapter_title=EXCLUDED.chapter_title,
+            printed_page_number=EXCLUDED.printed_page_number,
+            raw_text=EXCLUDED.raw_text,
+            cleaned_text=EXCLUDED.cleaned_text,
+            detected_language=EXCLUDED.detected_language,
+            word_count=EXCLUDED.word_count,
+            token_count=EXCLUDED.token_count,
+            metadata=EXCLUDED.metadata
+        """
+        params = []
+        for page in pages:
+            page_number = int(page["page_number"])
+            chapter = chapter_for_page(page_number)
+            page_metadata = dict(page.get("metadata") or {})
+            printed_page_number = resolver.printed_page_for_pdf_page(page_number) if resolver else None
+            page_metadata.update({
+                "source_table": "embeddings_raw_text_pages",
+                "file_metadata_source": metadata.get("path_metadata_source"),
+                "printed_page_number": printed_page_number,
+                "chapter_detection_source": chapter.get("detected_by"),
+            })
+            params.append(
+                (
+                    document_id,
+                    metadata.get("school_name"),
+                    metadata.get("class_name"),
+                    metadata.get("grade"),
+                    metadata.get("subject"),
+                    metadata.get("book_title") or metadata.get("title"),
+                    chapter.get("chapter_number"),
+                    chapter.get("chapter_title"),
+                    page_number,
+                    printed_page_number,
+                    page.get("raw_text"),
+                    page.get("cleaned_text"),
+                    page.get("detected_language"),
+                    page.get("word_count"),
+                    page.get("token_count"),
+                    _json(page_metadata),
+                )
+            )
+        with get_connection(self.database_url) as conn, conn.transaction():
+            with conn.cursor() as cur:
+                cur.executemany(sql, params)
+
     def insert_embeddings(self, records: list[EmbeddingRecord]) -> None:
         if not records:
             return
@@ -217,8 +357,9 @@ class RagRepository:
         if not value:
             return None
         sql = f"""
-        SELECT d.id, d.title, d.subject, d.grade, d.language, d.file_name, d.file_hash,
-               d.total_pages, d.total_words, d.total_tokens,
+        SELECT d.id, d.title, d.book_title, d.school_name, d.class_name, d.subject, d.grade, d.language,
+               d.primary_language, d.content_profile, d.chunking_strategy, d.chunk_max_tokens, d.chunk_overlap_tokens,
+               d.file_name, d.file_hash, d.total_pages, d.total_words, d.total_tokens,
                COUNT(DISTINCT c.id)::int AS chunks,
                COUNT(DISTINCT v.id)::int AS embeddings
         FROM embeddings_documents d
@@ -238,7 +379,7 @@ class RagRepository:
         params = [to_pgvector(query_embedding)] + params + [limit]
         sql = f"""
         SELECT c.id::text AS chunk_id,
-               c.content, c.content_clean, c.book_title, c.subject, c.grade, c.language,
+               c.content, c.content_clean, c.book_title, c.school_name, c.class_name, c.subject, c.grade, c.language,
                c.chapter_title, c.section_title, c.topic, c.chunk_type, c.page_start, c.page_end,
                c.source_label, c.citation_text,
                GREATEST(0, 1 - (v.embedding <=> %s::vector)) AS vector_score,
@@ -261,7 +402,7 @@ class RagRepository:
         prefix = "WHERE" if not where else where + " AND"
         sql = f"""
         SELECT c.id::text AS chunk_id,
-               c.content, c.content_clean, c.book_title, c.subject, c.grade, c.language,
+               c.content, c.content_clean, c.book_title, c.school_name, c.class_name, c.subject, c.grade, c.language,
                c.chapter_title, c.section_title, c.topic, c.chunk_type, c.page_start, c.page_end,
                c.source_label, c.citation_text,
                0.0::float AS vector_score,
@@ -281,7 +422,7 @@ class RagRepository:
     def _build_filter_sql(self, filters: dict[str, Any], table_alias: str = "c") -> tuple[str, list[Any]]:
         clauses: list[str] = []
         params: list[Any] = []
-        exact_fields = ["subject", "grade", "language", "board", "document_id", "chunk_type"]
+        exact_fields = ["subject", "school_name", "grade", "class_name", "language", "board", "document_id", "chunk_type", "book_title"]
         for field in exact_fields:
             value = filters.get(field)
             if value:

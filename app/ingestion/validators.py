@@ -19,7 +19,7 @@ def validate_pdf_file(path: Path) -> None:
 def validate_ingest_args(pdf_path: Path, metadata: dict[str, Any]) -> None:
     validate_pdf_file(pdf_path)
     if not metadata.get("title"):
-        raise ValueError("--title is required unless using ingest-folder, where the PDF file name is used.")
+        raise ValueError("Book title is required. It is normally derived from <Subject>_<Book Title>.pdf, or pass --title/--book-title.")
     language = metadata.get("language")
     if language not in VALID_LANGUAGES:
         raise ValueError(f"Unsupported --language={language}. Use Hindi, English, Mixed, Hinglish, or omit it.")

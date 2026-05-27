@@ -47,6 +47,8 @@ class MetadataBuilder:
         self,
         *,
         book_title: str,
+        school_name: str | None,
+        class_name: str | None,
         subject: str | None,
         grade: str | None,
         board: str | None,
@@ -59,9 +61,11 @@ class MetadataBuilder:
     ) -> str:
         return "\n".join(
             [
+                f"School: {school_name or ''}",
+                f"Class: {class_name or grade or ''}",
                 f"Book: {book_title or ''}",
                 f"Subject: {subject or ''}",
-                f"Grade: {grade or ''}",
+                f"Grade: {grade or class_name or ''}",
                 f"Board: {board or ''}",
                 f"Language: {language or ''}",
                 f"Chapter: {structure.chapter_title or ''}",
@@ -88,9 +92,11 @@ class MetadataBuilder:
         formulas = self.extract_formulas(text)
         numbers = self.extract_numbers(text)
         question_types = self.extract_question_types(text)
-        book_title = metadata.get("title") or base.get("book_title") or "Untitled Book"
+        book_title = metadata.get("book_title") or metadata.get("title") or base.get("book_title") or "Untitled Book"
         content_for_embedding = self.build_content_for_embedding(
             book_title=book_title,
+            school_name=metadata.get("school_name"),
+            class_name=metadata.get("class_name"),
             subject=metadata.get("subject"),
             grade=metadata.get("grade"),
             board=metadata.get("board"),
@@ -105,6 +111,8 @@ class MetadataBuilder:
         chunk = {
             **base,
             "book_title": book_title,
+            "school_name": metadata.get("school_name"),
+            "class_name": metadata.get("class_name"),
             "subject": metadata.get("subject"),
             "grade": metadata.get("grade"),
             "board": metadata.get("board"),
@@ -139,6 +147,9 @@ class MetadataBuilder:
             "citation_text": self.build_citation_text(book_title, base["page_start"], base["page_end"]),
             "metadata": {
                 "embedding_input_hash": sha256_text(content_for_embedding),
+                "school_name": metadata.get("school_name"),
+                "class_name": metadata.get("class_name"),
+                "book_title": book_title,
                 "source_pages": list(range(base["page_start"], base["page_end"] + 1)),
             },
         }

@@ -49,14 +49,20 @@ class RagSearchService:
 
     def _metadata_score(self, row: dict[str, Any], query: str, filters: dict[str, Any]) -> float:
         score = 0.0
+        if filters.get("school_name") and row.get("school_name") == filters["school_name"]:
+            score += 0.25
+        if filters.get("book_title") and row.get("book_title") == filters["book_title"]:
+            score += 0.20
         if filters.get("subject") and row.get("subject") == filters["subject"]:
             score += 0.25
         if filters.get("grade") and row.get("grade") == filters["grade"]:
             score += 0.20
+        if filters.get("class_name") and row.get("class_name") == filters["class_name"]:
+            score += 0.20
         if filters.get("language") and row.get("language") == filters["language"]:
             score += 0.20
         query_terms = {t.lower() for t in re.findall(r"[A-Za-z\u0900-\u097F]{3,}", query)}
-        text = " ".join(str(row.get(k) or "") for k in ["topic", "chapter_title", "section_title", "chunk_type"]).lower()
+        text = " ".join(str(row.get(k) or "") for k in ["school_name", "book_title", "topic", "chapter_title", "section_title", "chunk_type"]).lower()
         if any(term in text for term in query_terms):
             score += 0.20
         if row.get("chunk_type") in {"definition", "explanation", "example", "activity", "grammar_rule", "worked_example"}:

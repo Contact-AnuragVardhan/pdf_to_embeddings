@@ -10,6 +10,7 @@ from rich.console import Console
 from config import Settings
 from db.migrations import init_schema
 from ingestion.ingest_service import IngestService
+from ingestion.path_metadata import derive_metadata_from_path, merge_metadata
 from ingestion.repository import RagRepository
 from ingestion.validators import validate_ingest_args
 from search.rag_search import RagSearchService
@@ -21,9 +22,12 @@ logger = logging.getLogger(__name__)
 
 
 def add_metadata_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--title", help="Book title. Defaults to PDF file stem for ingest-folder.")
-    parser.add_argument("--subject", help="Subject, e.g. Hindi, English, Maths, Science, EVS.")
-    parser.add_argument("--grade", help="Grade/class, e.g. 5.")
+    parser.add_argument("--title", help="Book title. For folder ingestion this is derived from <Subject>_<Book Title>.pdf.")
+    parser.add_argument("--book-title", help="Book title/name. Defaults to title parsed from <Subject>_<Book Title>.pdf.")
+    parser.add_argument("--subject", help="Subject, e.g. Hindi, English, Maths, Science, EVS. Defaults to filename prefix before underscore.")
+    parser.add_argument("--school-name", help="School name. Defaults to input/<School Name>/<Class-Grade>/<PDF>.")
+    parser.add_argument("--class-name", help="Class/grade folder name, e.g. Class-7. Defaults to input/<School>/<Class-Grade>/<PDF>.")
+    parser.add_argument("--grade", help="Grade/class, e.g. Class-7 or 7. Defaults to --class-name/path class folder.")
     parser.add_argument("--board", help="Board, e.g. CBSE, NCERT, ICSE.")
     parser.add_argument("--medium", help="Medium, e.g. Hindi or English.")
     parser.add_argument("--language", help="Declared language, e.g. Hindi, English, Mixed.")
@@ -63,7 +67,10 @@ def build_parser() -> argparse.ArgumentParser:
     search = sub.add_parser("search", help="Hybrid RAG search over ingested chunks.")
     search.add_argument("--query", required=True)
     search.add_argument("--subject")
+    search.add_argument("--school-name")
     search.add_argument("--grade")
+    search.add_argument("--class-name")
+    search.add_argument("--book-title")
     search.add_argument("--language")
     search.add_argument("--board")
     search.add_argument("--document-id")
@@ -74,12 +81,21 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def metadata_from_args(args: argparse.Namespace, title_fallback: str | None = None) -> dict[str, Any]:
-    title = args.title or title_fallback
-    return {
-        "title": title,
+def metadata_from_args(
+    args: argparse.Namespace,
+    *,
+    pdf_path: Path | None = None,
+    input_root: Path | None = None,
+    title_fallback: str | None = None,
+) -> dict[str, Any]:
+    path_metadata = derive_metadata_from_path(pdf_path, input_root) if pdf_path else {}
+    cli_metadata = {
+        "title": args.title or args.book_title,
+        "book_title": args.book_title or args.title,
         "subject": args.subject,
-        "grade": args.grade,
+        "school_name": args.school_name,
+        "class_name": args.class_name,
+        "grade": args.grade or args.class_name,
         "board": args.board,
         "medium": args.medium,
         "language": args.language,
@@ -92,6 +108,13 @@ def metadata_from_args(args: argparse.Namespace, title_fallback: str | None = No
         "license_notes": args.license_notes,
         "source_uri": args.source_uri,
     }
+    metadata = merge_metadata(path_metadata, cli_metadata)
+    # Keep the existing title field as the book title used throughout the older code.
+    metadata["title"] = metadata.get("title") or metadata.get("book_title") or title_fallback
+    metadata["book_title"] = metadata.get("book_title") or metadata.get("title")
+    metadata["grade"] = metadata.get("grade") or metadata.get("class_name")
+    metadata["class_name"] = metadata.get("class_name") or metadata.get("grade")
+    return metadata
 
 
 def handle_init_db(args: argparse.Namespace, settings: Settings) -> None:
@@ -101,7 +124,7 @@ def handle_init_db(args: argparse.Namespace, settings: Settings) -> None:
 
 def handle_ingest(args: argparse.Namespace, settings: Settings) -> None:
     pdf_path = Path(args.pdf)
-    metadata = metadata_from_args(args, title_fallback=pdf_path.stem)
+    metadata = metadata_from_args(args, pdf_path=pdf_path, title_fallback=pdf_path.stem)
     validate_ingest_args(pdf_path, metadata)
     if args.validate_only:
         console.print("[green]Validation passed.[/green]")
@@ -124,7 +147,7 @@ def handle_ingest_folder(args: argparse.Namespace, settings: Settings) -> None:
     input_dir = Path(args.input_dir)
     if not input_dir.exists() or not input_dir.is_dir():
         raise ValueError(f"Input directory does not exist: {input_dir}")
-    pdf_files = sorted(input_dir.glob("*.pdf"))
+    pdf_files = sorted(input_dir.rglob("*.pdf"))
     if not pdf_files:
         console.print(f"[yellow]No PDF files found in {input_dir}.[/yellow]")
         return
@@ -133,7 +156,7 @@ def handle_ingest_folder(args: argparse.Namespace, settings: Settings) -> None:
     service = IngestService(settings, repository)
     results: list[dict[str, Any]] = []
     for pdf_path in pdf_files:
-        metadata = metadata_from_args(args, title_fallback=pdf_path.stem)
+        metadata = metadata_from_args(args, pdf_path=pdf_path, input_root=input_dir, title_fallback=pdf_path.stem)
         validate_ingest_args(pdf_path, metadata)
         if args.validate_only:
             results.append({"file": str(pdf_path), "status": "validated"})
@@ -153,7 +176,10 @@ def handle_search(args: argparse.Namespace, settings: Settings) -> None:
         top_k=args.top_k,
         filters={
             "subject": args.subject,
+            "school_name": args.school_name,
             "grade": args.grade,
+            "class_name": args.class_name,
+            "book_title": args.book_title,
             "language": args.language,
             "board": args.board,
             "document_id": args.document_id,

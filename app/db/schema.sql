@@ -12,13 +12,18 @@ $$ LANGUAGE plpgsql;
 CREATE TABLE IF NOT EXISTS embeddings_documents (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     title text NOT NULL,
+    book_title text,
     normalized_title text,
+    school_name text,
+    class_name text,
     subject text,
     grade text,
     board text,
     medium text,
     language text,
     detected_language text,
+    primary_language text,
+    languages_detected jsonb DEFAULT '[]'::jsonb,
     publisher text,
     edition text,
     publication_year text,
@@ -37,10 +42,31 @@ CREATE TABLE IF NOT EXISTS embeddings_documents (
     extraction_status text,
     copyright_status text,
     license_notes text,
+    llm_metadata_model text,
+    llm_metadata_confidence numeric,
+    structure_detected_by text,
+    content_profile text,
+    chunking_strategy text,
+    chunk_max_tokens int,
+    chunk_overlap_tokens int,
     metadata jsonb DEFAULT '{}'::jsonb,
     created_at timestamptz DEFAULT now(),
     updated_at timestamptz DEFAULT now()
 );
+
+ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS book_title text;
+ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS school_name text;
+ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS class_name text;
+ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS primary_language text;
+ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS languages_detected jsonb DEFAULT '[]'::jsonb;
+ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS llm_metadata_model text;
+ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS llm_metadata_confidence numeric;
+ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS structure_detected_by text;
+ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS content_profile text;
+ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS chunking_strategy text;
+ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS chunk_max_tokens int;
+ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS chunk_overlap_tokens int;
+UPDATE embeddings_documents SET book_title = title WHERE book_title IS NULL;
 
 DROP TRIGGER IF EXISTS embeddings_documents_touch_updated_at ON embeddings_documents;
 CREATE TRIGGER embeddings_documents_touch_updated_at
@@ -68,6 +94,28 @@ CREATE TABLE IF NOT EXISTS embeddings_pages (
     UNIQUE(document_id, page_number)
 );
 
+CREATE TABLE IF NOT EXISTS embeddings_book_chapters (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id uuid REFERENCES embeddings_documents(id) ON DELETE CASCADE,
+    chapter_number text,
+    chapter_title text NOT NULL,
+    printed_start_page int,
+    printed_end_page int,
+    pdf_start_page int,
+    pdf_end_page int,
+    detected_by text,
+    confidence numeric,
+    metadata jsonb DEFAULT '{}'::jsonb,
+    created_at timestamptz DEFAULT now(),
+    updated_at timestamptz DEFAULT now(),
+    UNIQUE(document_id, chapter_number, chapter_title)
+);
+
+DROP TRIGGER IF EXISTS embeddings_book_chapters_touch_updated_at ON embeddings_book_chapters;
+CREATE TRIGGER embeddings_book_chapters_touch_updated_at
+BEFORE UPDATE ON embeddings_book_chapters
+FOR EACH ROW EXECUTE FUNCTION embeddings_touch_updated_at();
+
 CREATE TABLE IF NOT EXISTS embeddings_chunks (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     document_id uuid REFERENCES embeddings_documents(id) ON DELETE CASCADE,
@@ -76,6 +124,8 @@ CREATE TABLE IF NOT EXISTS embeddings_chunks (
     chunk_index int NOT NULL,
 
     book_title text,
+    school_name text,
+    class_name text,
     subject text,
     grade text,
     board text,
@@ -132,10 +182,46 @@ CREATE TABLE IF NOT EXISTS embeddings_chunks (
     UNIQUE(document_id, chunk_index)
 );
 
+ALTER TABLE embeddings_chunks ADD COLUMN IF NOT EXISTS school_name text;
+ALTER TABLE embeddings_chunks ADD COLUMN IF NOT EXISTS class_name text;
+ALTER TABLE embeddings_chunks ADD COLUMN IF NOT EXISTS book_title text;
+
+CREATE TABLE IF NOT EXISTS embeddings_raw_text_pages (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id uuid REFERENCES embeddings_documents(id) ON DELETE CASCADE,
+    school_name text,
+    class_name text,
+    grade text,
+    subject text,
+    book_title text,
+    chapter_number text,
+    chapter_title text,
+    page_number int NOT NULL,
+    printed_page_number int,
+    raw_text text,
+    cleaned_text text,
+    detected_language text,
+    word_count int,
+    token_count int,
+    metadata jsonb DEFAULT '{}'::jsonb,
+    created_at timestamptz DEFAULT now(),
+    updated_at timestamptz DEFAULT now(),
+    UNIQUE(document_id, page_number)
+);
+
+ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS printed_page_number int;
+
+DROP TRIGGER IF EXISTS embeddings_raw_text_pages_touch_updated_at ON embeddings_raw_text_pages;
+CREATE TRIGGER embeddings_raw_text_pages_touch_updated_at
+BEFORE UPDATE ON embeddings_raw_text_pages
+FOR EACH ROW EXECUTE FUNCTION embeddings_touch_updated_at();
+
 CREATE OR REPLACE FUNCTION embeddings_chunks_search_vector_update()
 RETURNS trigger AS $$
 BEGIN
     NEW.search_vector :=
+        setweight(to_tsvector('simple', coalesce(NEW.school_name, '')), 'A') ||
+        setweight(to_tsvector('simple', coalesce(NEW.class_name, '')), 'A') ||
         setweight(to_tsvector('simple', coalesce(NEW.book_title, '')), 'A') ||
         setweight(to_tsvector('simple', coalesce(NEW.chapter_title, '')), 'A') ||
         setweight(to_tsvector('simple', coalesce(NEW.topic, '')), 'B') ||
@@ -152,7 +238,7 @@ FOR EACH ROW EXECUTE FUNCTION embeddings_touch_updated_at();
 
 DROP TRIGGER IF EXISTS embeddings_chunks_search_vector_trigger ON embeddings_chunks;
 CREATE TRIGGER embeddings_chunks_search_vector_trigger
-BEFORE INSERT OR UPDATE OF book_title, chapter_title, topic, section_title, content_clean
+BEFORE INSERT OR UPDATE OF school_name, class_name, book_title, chapter_title, topic, section_title, content_clean
 ON embeddings_chunks
 FOR EACH ROW EXECUTE FUNCTION embeddings_chunks_search_vector_update();
 
@@ -185,12 +271,25 @@ CREATE TABLE IF NOT EXISTS embeddings_ingestion_runs (
 );
 
 CREATE INDEX IF NOT EXISTS embeddings_documents_file_hash_idx ON embeddings_documents(file_hash);
+CREATE INDEX IF NOT EXISTS embeddings_documents_school_class_idx ON embeddings_documents(school_name, class_name);
 CREATE INDEX IF NOT EXISTS embeddings_documents_subject_grade_language_idx ON embeddings_documents(subject, grade, language);
 CREATE INDEX IF NOT EXISTS embeddings_documents_title_idx ON embeddings_documents(title);
+CREATE INDEX IF NOT EXISTS embeddings_documents_book_title_idx ON embeddings_documents(book_title);
+CREATE INDEX IF NOT EXISTS embeddings_documents_content_profile_idx ON embeddings_documents(content_profile);
 
 CREATE INDEX IF NOT EXISTS embeddings_pages_document_page_idx ON embeddings_pages(document_id, page_number);
 
+CREATE INDEX IF NOT EXISTS embeddings_book_chapters_document_idx ON embeddings_book_chapters(document_id);
+CREATE INDEX IF NOT EXISTS embeddings_book_chapters_title_idx ON embeddings_book_chapters(chapter_title);
+CREATE INDEX IF NOT EXISTS embeddings_book_chapters_pdf_range_idx ON embeddings_book_chapters(document_id, pdf_start_page, pdf_end_page);
+
+CREATE INDEX IF NOT EXISTS embeddings_raw_text_pages_document_page_idx ON embeddings_raw_text_pages(document_id, page_number);
+CREATE INDEX IF NOT EXISTS embeddings_raw_text_pages_printed_page_idx ON embeddings_raw_text_pages(document_id, printed_page_number);
+CREATE INDEX IF NOT EXISTS embeddings_raw_text_pages_chapter_idx ON embeddings_raw_text_pages(chapter_title);
+CREATE INDEX IF NOT EXISTS embeddings_raw_text_pages_school_class_idx ON embeddings_raw_text_pages(school_name, class_name);
+
 CREATE INDEX IF NOT EXISTS embeddings_chunks_document_idx ON embeddings_chunks(document_id);
+CREATE INDEX IF NOT EXISTS embeddings_chunks_school_class_idx ON embeddings_chunks(school_name, class_name);
 CREATE INDEX IF NOT EXISTS embeddings_chunks_subject_grade_language_idx ON embeddings_chunks(subject, grade, language);
 CREATE INDEX IF NOT EXISTS embeddings_chunks_chapter_title_idx ON embeddings_chunks(chapter_title);
 CREATE INDEX IF NOT EXISTS embeddings_chunks_topic_idx ON embeddings_chunks(topic);

@@ -1,206 +1,368 @@
-# pdf_embedding_pipeline
+# PDF Embedding Pipeline with School/Class/Book Metadata, LLM Chapter Detection, Auto Chunking, and RAG Validation
 
-Standalone CLI project to ingest readable/selectable PDF books into PostgreSQL + pgvector for future Teacher Helper RAG search.
+This pipeline ingests readable/selectable PDFs into PostgreSQL + pgvector for RAG search.
 
-It supports Hindi, English, mixed Hindi-English, maths, grammar, stories, poems, examples, exercises, definitions, formulas, numbers, and table-like text. It does **not** depend on the Teacher Helper app.
-
-## What it stores
-
-All database table names start with `embeddings_`:
-
-| Table | Purpose |
-|---|---|
-| `embeddings_documents` | One row per PDF/book with school/book metadata and file hash |
-| `embeddings_pages` | One row per extracted PDF page with raw/cleaned text and page flags |
-| `embeddings_chunks` | Meaningful RAG chunks with content, metadata, flags, keywords, formulas, and citations |
-| `embeddings_vectors` | `text-embedding-3-large` vectors stored as `vector(3072)` |
-| `embeddings_ingestion_runs` | Audit trail for ingestion status, counts, warnings, and errors |
-
-Important design choices:
-
-- Original chunks are stored, not only embeddings.
-- Page numbers and source labels are preserved for citation.
-- `metadata jsonb` is included for future expansion.
-- `content_for_embedding` is stored separately from `content_clean`.
-- Hybrid search is used: vector search + PostgreSQL full-text search + metadata scoring.
-- Metadata filters support future Teacher Helper use cases: subject, grade, board, language, chapter, topic, page range, and chunk type.
-- Formulas, numbers, Hindi punctuation, Devanagari, and math symbols are preserved instead of over-cleaned.
-
-## Limits
-
-This pipeline is for **readable/selectable PDFs**. If most pages have no selectable text, the tool logs:
+It supports folders like:
 
 ```text
-This appears to be scanned PDF. OCR is required before embedding.
+input/Mother Miracle School/Class-7/Maths_RSAgarwal.pdf
 ```
 
-OCR is intentionally not implemented in this version. OCR scanned books first, then run this pipeline.
+The path is parsed into:
 
-Use copyrighted books only when you have the proper license/permission for indexing and app usage.
-
-## PostgreSQL setup
-
-Install PostgreSQL and pgvector. Then create a database:
-
-```sql
-CREATE DATABASE pdf_rag_db;
+```text
+school_name = Mother Miracle School
+class_name  = Class-7
+grade       = Class-7
+subject     = Maths
+book_title  = RSAgarwal
 ```
 
-The project schema enables:
+All CLI commands should be run from the **project root** using:
 
-```sql
-CREATE EXTENSION IF NOT EXISTS vector;
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+```powershell
+python app/main.py ...
 ```
 
-The vector table uses:
+Do not use `python main.py` unless you intentionally keep a root-level compatibility wrapper.
 
-```sql
-embedding vector(3072) NOT NULL
+## What was added
+
+- Recursive folder ingestion.
+- School/class/subject/book metadata from folder and file name.
+- LLM metadata detection using `OPENAI_METADATA_MODEL`, default `gpt-5.4`.
+- Model-name-agnostic metadata call; you can change to `gpt-4o-mini` or `gpt-5.4-mini` in `.env`.
+- `embeddings_book_chapters` table.
+- `embeddings_raw_text_pages` now includes chapter and printed page mapping.
+- Auto chunking per book using LLM recommendation + safe heuristic fallback.
+- Deterministic fallback if LLM metadata detection fails.
+- RAG validation commands to verify table counts, metadata, chapter detection, raw page mapping, and semantic search results.
+
+## Important OpenAI model settings
+
+Embeddings stay fixed because the DB column is `vector(3072)`:
+
+```env
+OPENAI_EMBEDDING_MODEL=text-embedding-3-large
+OPENAI_EMBEDDING_DIMENSIONS=3072
 ```
 
-The schema tries to create an HNSW cosine index. If HNSW is unavailable, it falls back to IVFFlat.
+Metadata/chapter detection is separate and can be changed:
 
-## Python setup
+```env
+OPENAI_METADATA_MODEL=gpt-5.4
+# or
+OPENAI_METADATA_MODEL=gpt-4o-mini
+# or
+OPENAI_METADATA_MODEL=gpt-5.4-mini
+```
 
-Windows PowerShell / Command Prompt:
+## Setup
 
-```bat
-cd pdf_embedding_pipeline
+From project root:
+
+```powershell
+cd D:\Project\JaltaSitaraApps\TeacherHelperProject\pdf_to_embeddings\pdf_embedding_pipeline
 python -m venv .venv
 .venv\Scripts\activate
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 copy .env.example .env
-```
-
-Linux/macOS:
-
-```bash
-cd pdf_embedding_pipeline
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
 ```
 
 Edit `.env`:
 
 ```env
-OPENAI_API_KEY=your_openai_key
-DATABASE_URL=postgresql://user:password@localhost:5432/pdf_rag_db
+OPENAI_API_KEY=your_key
+
 OPENAI_EMBEDDING_MODEL=text-embedding-3-large
 OPENAI_EMBEDDING_DIMENSIONS=3072
+
+OPENAI_METADATA_MODEL=gpt-5.4
+AUTO_METADATA_ENABLED=true
+METADATA_SAMPLE_PAGES=20
+METADATA_MAX_OUTPUT_TOKENS=6000
+
+AUTO_CHUNKING_ENABLED=true
+DEFAULT_CHUNK_MAX_TOKENS=750
+DEFAULT_CHUNK_OVERLAP_TOKENS=120
+
+DATABASE_URL=postgresql://USER:PASSWORD@HOST/DBNAME?sslmode=require
+EMBEDDING_BATCH_SIZE=64
+REINDEX_EXISTING=false
+LOG_LEVEL=INFO
 ```
 
-## Initialize database
+## Fresh reset command
 
-```bash
-python main.py init-db
+This deletes only the embedding pipeline tables.
+
+```powershell
+python -c "from dotenv import load_dotenv; import os, psycopg; load_dotenv(); conn=psycopg.connect(os.environ['DATABASE_URL'], autocommit=True); cur=conn.cursor(); cur.execute('DROP TABLE IF EXISTS public.embeddings_vectors CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_raw_text_pages CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_book_chapters CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_chunks CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_pages CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_ingestion_runs CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_documents CASCADE'); conn.close(); print('Embedding tables deleted')"
 ```
 
-## Ingest one PDF
+Then recreate:
 
-Windows Command Prompt:
-
-```bat
-python main.py ingest ^
-  --pdf "input/Hindi Vyakaran Rachna.pdf" ^
-  --title "Hindi Vyakaran Rachna" ^
-  --subject "Hindi" ^
-  --grade "5" ^
-  --board "CBSE" ^
-  --medium "Hindi" ^
-  --language "Hindi" ^
-  --publisher "Unknown" ^
-  --copyright-status "licensed/internal"
+```powershell
+python app/main.py init-db
 ```
 
-Linux/macOS:
+## Ingest all PDFs
 
-```bash
-python main.py ingest \
-  --pdf "input/Hindi Vyakaran Rachna.pdf" \
-  --title "Hindi Vyakaran Rachna" \
-  --subject "Hindi" \
-  --grade "5" \
-  --board "CBSE" \
-  --medium "Hindi" \
-  --language "Hindi" \
-  --publisher "Unknown" \
-  --copyright-status "licensed/internal"
+Use this folder format:
+
+```text
+input\Mother Miracle School\Class-7\Maths_RSAgarwal.pdf
 ```
 
-## Reindex one PDF
+Run ingestion:
 
-```bash
-python main.py ingest --pdf "input/book.pdf" --title "Book" --subject "Maths" --grade "5" --reindex
+```powershell
+python app/main.py ingest-folder --input-dir "input" --board "CBSE" --language "English"
 ```
 
-## Batch ingest a folder
+For reprocessing the same files:
 
-```bash
-python main.py ingest-folder \
-  --input-dir "input" \
-  --subject "Hindi" \
-  --grade "5" \
-  --board "CBSE" \
-  --language "Hindi"
+```powershell
+python app/main.py ingest-folder --input-dir "input" --board "CBSE" --language "English" --reindex
 ```
 
-## Dry run / validate only
+## Dry run
 
-Dry run extracts and chunks but does not insert into the database or call OpenAI:
+Dry run extracts, detects metadata/chapter structure, selects chunking plan, and chunks, but does not write DB or create embeddings.
 
-```bash
-python main.py ingest --pdf "input/book.pdf" --title "Book" --dry-run
-```
-
-Validate only checks file existence/type and metadata arguments:
-
-```bash
-python main.py ingest --pdf "input/book.pdf" --title "Book" --validate-only
+```powershell
+python app/main.py ingest-folder --input-dir "input" --board "CBSE" --language "English" --dry-run
 ```
 
 ## Search
 
-```bash
-python main.py search \
-  --query "संज्ञा पर 40 मिनट का lesson plan" \
-  --subject "Hindi" \
-  --grade "5" \
-  --language "Hindi" \
-  --top-k 8
+```powershell
+python app/main.py search --query "integers addition rules" --school-name "Mother Miracle School" --class-name "Class-7" --subject "Maths" --book-title "RSAgarwal" --top-k 5
 ```
 
-Search returns:
+## How chapter detection works
 
-- chunk id
-- content preview
-- book title
-- subject
-- grade
-- language
-- chapter title
-- section title
-- topic
-- chunk type
-- page range
-- source label
-- citation text
-- final weighted score
+1. The code extracts sample pages from the PDF.
+2. The LLM reads front matter, title page, contents/index pages, and sample body pages.
+3. The LLM returns strict JSON for book title, language, publisher, chapters, printed page numbers, and chunking recommendation.
+4. The code verifies/fills `pdf_start_page` by scanning actual extracted pages for chapter titles.
+5. Page ranges are calculated and stored in `embeddings_book_chapters`.
+6. Raw pages and chunks get `chapter_number`, `chapter_title`, `page_number`, and `printed_page_number`.
 
-## Metadata fields
+If the LLM fails or API key is missing, the code falls back to rule-based TOC detection.
 
-Document metadata captures book-level values from CLI plus automatically computed file and extraction details.
+## How auto chunking works
 
-Chunk metadata captures:
+`DEFAULT_CHUNK_MAX_TOKENS` and `DEFAULT_CHUNK_OVERLAP_TOKENS` are now fallbacks only.
 
-- book/school metadata: book title, subject, grade, board, medium, language
-- structure metadata: chapter, unit, lesson, section, subsection, topic
-- content classification: chunk type, content domain, difficulty level, pedagogical role
-- content features: formulas, numbers, question types, important terms, keywords
-- citation metadata: source label and page citation
+When `AUTO_CHUNKING_ENABLED=true`, each book gets a chunking profile:
 
-## Opening in PyCharm
+```text
+math_textbook       -> around 620 / 90
+question_bank       -> around 520 / 70
+science_textbook    -> around 760 / 110
+english_literature  -> around 1000 / 150
+hindi_literature    -> around 900 / 140
+grammar             -> around 680 / 100
+mixed_textbook      -> around 750 / 120
+```
 
-Open the `pdf_embedding_pipeline` folder in PyCharm, create a Python interpreter from `.venv`, install requirements, create `.env`, then run `main.py` with the CLI arguments above.
+The actual selected values are stored in:
+
+```text
+embeddings_documents.chunking_strategy
+embeddings_documents.chunk_max_tokens
+embeddings_documents.chunk_overlap_tokens
+embeddings_documents.content_profile
+```
+
+# RAG Search Validation Checklist
+
+Use this section after a fresh reset and ingestion to check whether RAG search will work correctly.
+
+RAG search is working fine only when these four things are true:
+
+```text
+1. Documents are stored.
+2. Chapters/pages/raw text are stored correctly.
+3. Embeddings are created.
+4. Search returns the correct chapter/page/chunk for real questions.
+```
+
+## 1. Run ingestion first
+
+From project root:
+
+```powershell
+cd D:\Project\JaltaSitaraApps\TeacherHelperProject\pdf_to_embeddings\pdf_embedding_pipeline
+.venv\Scripts\activate
+```
+
+Fresh run:
+
+```powershell
+python app/main.py init-db
+python app/main.py ingest-folder --input-dir "input" --board "CBSE" --language "English"
+```
+
+## 2. Check table counts
+
+```powershell
+python -c "from dotenv import load_dotenv; import os, psycopg; load_dotenv(); conn=psycopg.connect(os.environ['DATABASE_URL']); tables=['embeddings_documents','embeddings_book_chapters','embeddings_raw_text_pages','embeddings_chunks','embeddings_vectors']; [print(t, conn.execute(f'SELECT count(*) FROM public.{t}').fetchone()[0]) for t in tables]; conn.close()"
+```
+
+Expected:
+
+```text
+embeddings_documents       > 0
+embeddings_book_chapters   > 0
+embeddings_raw_text_pages  > 0
+embeddings_chunks          > 0
+embeddings_vectors         > 0
+```
+
+If `embeddings_vectors = 0`, RAG semantic search will not work.
+
+## 3. Check document metadata
+
+```powershell
+python -c "from dotenv import load_dotenv; import os, psycopg; load_dotenv(); conn=psycopg.connect(os.environ['DATABASE_URL']); rows=conn.execute('SELECT id, school_name, class_name, grade, subject, book_title, chunking_strategy, chunk_max_tokens, chunk_overlap_tokens FROM public.embeddings_documents ORDER BY created_at DESC LIMIT 10').fetchall(); [print(r) for r in rows]; conn.close()"
+```
+
+You should see something like:
+
+```text
+Mother Miracle School
+Class-7
+Maths
+RSAgarwal
+math_textbook
+620
+90
+```
+
+## 4. Check chapter detection
+
+```powershell
+python -c "from dotenv import load_dotenv; import os, psycopg; load_dotenv(); conn=psycopg.connect(os.environ['DATABASE_URL']); rows=conn.execute('SELECT chapter_number, chapter_title, printed_start_page, pdf_start_page, pdf_end_page, confidence FROM public.embeddings_book_chapters ORDER BY document_id, chapter_number LIMIT 30').fetchall(); [print(r) for r in rows]; conn.close()"
+```
+
+For `Maths_RSAgarwal.pdf`, you should see chapters like:
+
+```text
+1 Integers
+2 Fractions
+3 Decimals
+4 Rational Numbers
+```
+
+If the chapter table is empty, LLM/fallback chapter detection did not work correctly.
+
+## 5. Check raw pages have chapter names
+
+```powershell
+python -c "from dotenv import load_dotenv; import os, psycopg; load_dotenv(); conn=psycopg.connect(os.environ['DATABASE_URL']); rows=conn.execute('SELECT page_number, printed_page_number, chapter_number, chapter_title, LEFT(cleaned_text,120) FROM public.embeddings_raw_text_pages WHERE chapter_title IS NOT NULL ORDER BY page_number LIMIT 20').fetchall(); [print(r) for r in rows]; conn.close()"
+```
+
+Good result:
+
+```text
+8, 1, 1, Integers, ...
+9, 2, 1, Integers, ...
+23, 16, 2, Fractions, ...
+```
+
+Bad result:
+
+```text
+chapter_number = null
+chapter_title = null
+```
+
+If chapter values are still null, chapter mapping failed.
+
+## 6. Run actual RAG search tests
+
+### Test 1: Integers
+
+```powershell
+python app/main.py search --query "addition rules for integers" --school-name "Mother Miracle School" --class-name "Class-7" --subject "Maths" --book-title "RSAgarwal" --top-k 5
+```
+
+Expected result should mention:
+
+```text
+Integers
+Addition of Integers
+Rules
+Examples
+```
+
+### Test 2: Fractions
+
+```powershell
+python app/main.py search --query "reciprocal of a fraction" --school-name "Mother Miracle School" --class-name "Class-7" --subject "Maths" --book-title "RSAgarwal" --top-k 5
+```
+
+Expected result should come from:
+
+```text
+Fractions
+Division of Fractions
+Reciprocal
+```
+
+### Test 3: Decimals
+
+```powershell
+python app/main.py search --query "multiplication of decimal by decimal" --school-name "Mother Miracle School" --class-name "Class-7" --subject "Maths" --book-title "RSAgarwal" --top-k 5
+```
+
+Expected result should come from:
+
+```text
+Decimals
+Multiplication of Decimals
+```
+
+## 7. Check if search is returning useful chunks
+
+A good RAG result should have:
+
+```text
+Correct book
+Correct subject
+Correct class
+Correct chapter
+Correct page range
+Useful text preview
+High score compared to other results
+```
+
+A bad result looks like:
+
+```text
+query: reciprocal of fraction
+result: Integers chapter
+```
+
+or:
+
+```text
+query: multiplication of decimals
+result: book preface / contents page
+```
+
+## 8. Best quick pass/fail rule
+
+Your RAG search is working fine if these three commands return correct-looking results:
+
+```powershell
+python app/main.py search --query "addition rules for integers" --school-name "Mother Miracle School" --class-name "Class-7" --subject "Maths" --book-title "RSAgarwal" --top-k 5
+
+python app/main.py search --query "reciprocal of a fraction" --school-name "Mother Miracle School" --class-name "Class-7" --subject "Maths" --book-title "RSAgarwal" --top-k 5
+
+python app/main.py search --query "multiplication of decimal by decimal" --school-name "Mother Miracle School" --class-name "Class-7" --subject "Maths" --book-title "RSAgarwal" --top-k 5
+```
+
+If all three return the right chapter/page content, retrieval is good enough for first testing.

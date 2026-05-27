@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from ingestion.book_structure import BookStructure, ChapterResolver
 from ingestion.metadata_builder import MetadataBuilder
 from ingestion.pdf_extractor import ExtractedPage
 from ingestion.structure_detector import StructureDetector, StructureState
@@ -37,8 +38,8 @@ class MeaningfulChunker:
         self.overlap_tokens = overlap_tokens
         self.min_useful_tokens = min_useful_tokens
 
-    def chunk_pages(self, pages: list[ExtractedPage], metadata: dict[str, Any]) -> list[dict[str, Any]]:
-        units = self._build_units(pages)
+    def chunk_pages(self, pages: list[ExtractedPage], metadata: dict[str, Any], book_structure: BookStructure | None = None) -> list[dict[str, Any]]:
+        units = self._build_units(pages, book_structure)
         chunks: list[dict[str, Any]] = []
         current: list[ParagraphUnit] = []
         current_tokens = 0
@@ -69,16 +70,25 @@ class MeaningfulChunker:
             self._flush(current, metadata, chunks, chunk_index)
         return chunks
 
-    def _build_units(self, pages: list[ExtractedPage]) -> list[ParagraphUnit]:
+    def _build_units(self, pages: list[ExtractedPage], book_structure: BookStructure | None = None) -> list[ParagraphUnit]:
+        resolver = ChapterResolver(book_structure.chapters) if book_structure else None
         state = StructureState()
         units: list[ParagraphUnit] = []
         for page in pages:
             if not page.cleaned_text.strip():
                 continue
+            # Prefer TOC/LLM page-to-chapter mapping over fragile heading regex.
+            page_state = resolver.structure_for_page(page.page_number) if resolver else StructureState()
+            if page_state.chapter_title:
+                state = page_state
             paragraphs = self._split_paragraphs(page.cleaned_text)
             for para in paragraphs:
                 heading = self.structure_detector.detect_heading(para)
                 state = self.structure_detector.update_state(state, heading)
+                # Do not let generic topic headings erase the LLM/TOC chapter mapping.
+                if page_state.chapter_title:
+                    state.chapter_number = page_state.chapter_number
+                    state.chapter_title = page_state.chapter_title
                 units.append(ParagraphUnit(para, page.page_number, StructureState(**state.as_dict())))
         return units
 
