@@ -1,0 +1,294 @@
+from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+from typing import Any, Iterable
+
+from psycopg.rows import dict_row
+
+from db.connection import get_connection
+from ingestion.embedding_service import EmbeddingRecord
+
+logger = logging.getLogger(__name__)
+
+
+def _json(value: Any) -> str:
+    return json.dumps(value if value is not None else {}, ensure_ascii=False)
+
+
+def _array(value: list[str] | None) -> list[str]:
+    return value or []
+
+
+def to_pgvector(values: list[float]) -> str:
+    return "[" + ",".join(f"{float(v):.10g}" for v in values) + "]"
+
+
+class RagRepository:
+    def __init__(self, database_url: str) -> None:
+        self.database_url = database_url
+
+    def init_schema(self, schema_path: Path) -> None:
+        from db.migrations import init_schema
+
+        init_schema(self.database_url, schema_path)
+
+    def create_ingestion_run(self, *, file_path: str, file_hash: str, metadata: dict[str, Any] | None = None) -> str:
+        with get_connection(self.database_url) as conn, conn.transaction():
+            row = conn.execute(
+                """
+                INSERT INTO embeddings_ingestion_runs(file_path, file_hash, status, metadata)
+                VALUES (%s, %s, 'running', %s::jsonb)
+                RETURNING id
+                """,
+                (file_path, file_hash, _json(metadata or {})),
+            ).fetchone()
+            return str(row[0])
+
+    def finish_ingestion_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        document_id: str | None = None,
+        pages_extracted: int = 0,
+        chunks_created: int = 0,
+        embeddings_created: int = 0,
+        error_message: str | None = None,
+        warnings: list[str] | None = None,
+    ) -> None:
+        with get_connection(self.database_url) as conn, conn.transaction():
+            conn.execute(
+                """
+                UPDATE embeddings_ingestion_runs
+                SET status=%s,
+                    document_id=%s,
+                    finished_at=now(),
+                    pages_extracted=%s,
+                    chunks_created=%s,
+                    embeddings_created=%s,
+                    error_message=%s,
+                    warnings=%s::jsonb
+                WHERE id=%s
+                """,
+                (status, document_id, pages_extracted, chunks_created, embeddings_created, error_message, _json(warnings or []), run_id),
+            )
+
+    def document_exists_by_hash(self, file_hash: str) -> dict[str, Any] | None:
+        with get_connection(self.database_url) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("SELECT * FROM embeddings_documents WHERE file_hash=%s", (file_hash,))
+                row = cur.fetchone()
+                return dict(row) if row else None
+
+    def delete_document_by_hash(self, file_hash: str) -> None:
+        with get_connection(self.database_url) as conn, conn.transaction():
+            conn.execute("DELETE FROM embeddings_documents WHERE file_hash=%s", (file_hash,))
+
+    def upsert_document(self, document: dict[str, Any]) -> str:
+        columns = [
+            "title", "normalized_title", "subject", "grade", "board", "medium", "language", "detected_language",
+            "publisher", "edition", "publication_year", "isbn", "author", "source_type", "source_uri", "file_name",
+            "file_path", "file_hash", "file_size_bytes", "mime_type", "total_pages", "total_words", "total_tokens",
+            "extraction_status", "copyright_status", "license_notes", "metadata",
+        ]
+        values = [document.get(c) for c in columns]
+        values[-1] = _json(values[-1] or {})
+        placeholders = ", ".join(["%s"] * (len(columns) - 1) + ["%s::jsonb"])
+        update_clause = ", ".join(f"{c}=EXCLUDED.{c}" for c in columns if c != "file_hash")
+        with get_connection(self.database_url) as conn, conn.transaction():
+            row = conn.execute(
+                f"""
+                INSERT INTO embeddings_documents({', '.join(columns)})
+                VALUES ({placeholders})
+                ON CONFLICT(file_hash) DO UPDATE SET {update_clause}
+                RETURNING id
+                """,
+                values,
+            ).fetchone()
+            return str(row[0])
+
+    def insert_pages(self, document_id: str, pages: list[dict[str, Any]]) -> None:
+        sql = """
+        INSERT INTO embeddings_pages(
+            document_id, page_number, raw_text, cleaned_text, detected_language, word_count, token_count,
+            has_text, has_math, has_table_like_text, has_devanagari, has_english, extraction_method,
+            extraction_quality, metadata
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb
+        )
+        ON CONFLICT(document_id, page_number) DO UPDATE SET
+            raw_text=EXCLUDED.raw_text,
+            cleaned_text=EXCLUDED.cleaned_text,
+            detected_language=EXCLUDED.detected_language,
+            word_count=EXCLUDED.word_count,
+            token_count=EXCLUDED.token_count,
+            has_text=EXCLUDED.has_text,
+            has_math=EXCLUDED.has_math,
+            has_table_like_text=EXCLUDED.has_table_like_text,
+            has_devanagari=EXCLUDED.has_devanagari,
+            has_english=EXCLUDED.has_english,
+            extraction_method=EXCLUDED.extraction_method,
+            extraction_quality=EXCLUDED.extraction_quality,
+            metadata=EXCLUDED.metadata
+        """
+        params = [
+            (
+                document_id, p["page_number"], p.get("raw_text"), p.get("cleaned_text"), p.get("detected_language"),
+                p.get("word_count"), p.get("token_count"), p.get("has_text"), p.get("has_math"),
+                p.get("has_table_like_text"), p.get("has_devanagari"), p.get("has_english"),
+                p.get("extraction_method"), p.get("extraction_quality"), _json(p.get("metadata", {})),
+            )
+            for p in pages
+        ]
+        with get_connection(self.database_url) as conn, conn.transaction():
+            with conn.cursor() as cur:
+                cur.executemany(sql, params)
+
+    def insert_chunks(self, document_id: str, chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        columns = [
+            "document_id", "page_start", "page_end", "chunk_index", "book_title", "subject", "grade", "board",
+            "medium", "language", "detected_language", "chapter_number", "chapter_title", "unit_title", "lesson_title",
+            "section_title", "subsection_title", "topic", "subtopic", "chunk_type", "content_domain", "difficulty_level",
+            "pedagogical_role", "content", "content_clean", "content_for_embedding", "summary", "keywords", "important_terms",
+            "formulas", "numbers", "question_types", "word_count", "token_count", "char_count", "has_formula",
+            "has_numbers", "has_questions", "has_exercises", "has_examples", "has_definition", "has_table_like_text",
+            "has_devanagari", "has_english", "source_label", "citation_text", "metadata",
+        ]
+        placeholders = ", ".join(["%s"] * (len(columns) - 1) + ["%s::jsonb"])
+        update_cols = [c for c in columns if c not in {"document_id", "chunk_index"}]
+        update_clause = ", ".join(f"{c}=EXCLUDED.{c}" for c in update_cols)
+        sql = f"""
+            INSERT INTO embeddings_chunks({', '.join(columns)})
+            VALUES ({placeholders})
+            ON CONFLICT(document_id, chunk_index) DO UPDATE SET {update_clause}
+            RETURNING id, chunk_index
+        """
+        enriched = []
+        with get_connection(self.database_url) as conn, conn.transaction():
+            for chunk in chunks:
+                values = []
+                for col in columns:
+                    if col == "document_id":
+                        values.append(document_id)
+                    elif col == "metadata":
+                        values.append(_json(chunk.get("metadata", {})))
+                    elif col in {"keywords", "important_terms", "formulas", "numbers", "question_types"}:
+                        values.append(_array(chunk.get(col)))
+                    else:
+                        values.append(chunk.get(col))
+                row = conn.execute(sql, values).fetchone()
+                item = dict(chunk)
+                item["id"] = str(row[0])
+                enriched.append(item)
+        return enriched
+
+    def insert_embeddings(self, records: list[EmbeddingRecord]) -> None:
+        if not records:
+            return
+        sql = """
+        INSERT INTO embeddings_vectors(
+            chunk_id, document_id, embedding_model, embedding_dimensions, embedding, embedding_input_hash
+        ) VALUES (%s, %s, %s, %s, %s::vector, %s)
+        ON CONFLICT(chunk_id, embedding_model, embedding_dimensions) DO UPDATE SET
+            embedding=EXCLUDED.embedding,
+            embedding_input_hash=EXCLUDED.embedding_input_hash,
+            created_at=now()
+        """
+        params = [
+            (
+                r.chunk_id,
+                r.document_id,
+                r.embedding_model,
+                r.embedding_dimensions,
+                to_pgvector(r.embedding),
+                r.embedding_input_hash,
+            )
+            for r in records
+        ]
+        with get_connection(self.database_url) as conn, conn.transaction():
+            with conn.cursor() as cur:
+                cur.executemany(sql, params)
+
+    def get_document_summary(self, document_id: str | None = None, file_hash: str | None = None) -> dict[str, Any] | None:
+        where = "d.id=%s" if document_id else "d.file_hash=%s"
+        value = document_id or file_hash
+        if not value:
+            return None
+        sql = f"""
+        SELECT d.id, d.title, d.subject, d.grade, d.language, d.file_name, d.file_hash,
+               d.total_pages, d.total_words, d.total_tokens,
+               COUNT(DISTINCT c.id)::int AS chunks,
+               COUNT(DISTINCT v.id)::int AS embeddings
+        FROM embeddings_documents d
+        LEFT JOIN embeddings_chunks c ON c.document_id=d.id
+        LEFT JOIN embeddings_vectors v ON v.document_id=d.id
+        WHERE {where}
+        GROUP BY d.id
+        """
+        with get_connection(self.database_url) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(sql, (value,))
+                row = cur.fetchone()
+                return dict(row) if row else None
+
+    def vector_search(self, query_embedding: list[float], filters: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+        where, params = self._build_filter_sql(filters, table_alias="c")
+        params = [to_pgvector(query_embedding)] + params + [limit]
+        sql = f"""
+        SELECT c.id::text AS chunk_id,
+               c.content, c.content_clean, c.book_title, c.subject, c.grade, c.language,
+               c.chapter_title, c.section_title, c.topic, c.chunk_type, c.page_start, c.page_end,
+               c.source_label, c.citation_text,
+               GREATEST(0, 1 - (v.embedding <=> %s::vector)) AS vector_score,
+               0.0::float AS keyword_score
+        FROM embeddings_vectors v
+        JOIN embeddings_chunks c ON c.id = v.chunk_id
+        {where}
+        ORDER BY v.embedding <=> %s::vector
+        LIMIT %s
+        """
+        params = [to_pgvector(query_embedding)] + params[1:-1] + [to_pgvector(query_embedding), limit]
+        with get_connection(self.database_url) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+                return [dict(r) for r in rows]
+
+    def keyword_search(self, query: str, filters: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+        where, filter_params = self._build_filter_sql(filters, table_alias="c")
+        prefix = "WHERE" if not where else where + " AND"
+        sql = f"""
+        SELECT c.id::text AS chunk_id,
+               c.content, c.content_clean, c.book_title, c.subject, c.grade, c.language,
+               c.chapter_title, c.section_title, c.topic, c.chunk_type, c.page_start, c.page_end,
+               c.source_label, c.citation_text,
+               0.0::float AS vector_score,
+               ts_rank_cd(c.search_vector, websearch_to_tsquery('simple', %s))::float AS keyword_score
+        FROM embeddings_chunks c
+        {prefix} c.search_vector @@ websearch_to_tsquery('simple', %s)
+        ORDER BY keyword_score DESC
+        LIMIT %s
+        """
+        params = [query] + filter_params + [query, limit] if where else [query, query, limit]
+        with get_connection(self.database_url) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+                return [dict(r) for r in rows]
+
+    def _build_filter_sql(self, filters: dict[str, Any], table_alias: str = "c") -> tuple[str, list[Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        exact_fields = ["subject", "grade", "language", "board", "document_id", "chunk_type"]
+        for field in exact_fields:
+            value = filters.get(field)
+            if value:
+                clauses.append(f"{table_alias}.{field} = %s")
+                params.append(value)
+        if filters.get("chapter_title"):
+            clauses.append(f"{table_alias}.chapter_title ILIKE %s")
+            params.append(f"%{filters['chapter_title']}%")
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        return where, params
