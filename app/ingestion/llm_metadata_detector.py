@@ -46,11 +46,18 @@ class LLMMetadataDetector:
                 detected_by=f"llm:{self.settings.openai_metadata_model}",
                 fallback_metadata=metadata,
             )
-            # Keep LLM metadata, but do not let it be the only source of structure.
-            # Fallback/rule-based detection may contain sections the LLM omitted, such as Answers.
-            structure.chapters = self._merge_missing_fallback_chapters(structure.chapters, fallback.chapters)
+            # Keep LLM metadata, but use deterministic TOC chapters when the rule-based
+            # detector has a reliable Contents page. LLMs often over-split math books
+            # into examples/exercises and can return 40-50 "chapters" for a 25-entry TOC.
+            if self._should_prefer_rule_based_chapters(structure.chapters, fallback.chapters):
+                structure.metadata["chapter_source"] = "rule_based_toc_preferred_over_llm"
+                structure.metadata["llm_chapter_count_before_repair"] = len(structure.chapters or [])
+                structure.chapters = [BookChapter(**c.to_dict()) for c in fallback.chapters]
+            else:
+                # Fallback/rule-based detection may contain sections the LLM omitted, such as Answers.
+                structure.chapters = self._merge_missing_fallback_chapters(structure.chapters, fallback.chapters)
+
             structure.chapters = enrich_chapter_page_ranges(structure.chapters, pages)
-            # Merge fallback chapters if LLM found none.
             if not structure.chapters and fallback.chapters:
                 structure.chapters = enrich_chapter_page_ranges(fallback.chapters, pages)
                 structure.metadata["llm_warning"] = "LLM returned no usable chapters; used rule-based TOC fallback."
@@ -75,12 +82,7 @@ class LLMMetadataDetector:
         primary: list[BookChapter],
         fallback: list[BookChapter],
     ) -> list[BookChapter]:
-        """Merge rule-based chapters/sections missing from LLM output.
-
-        LLM output is useful for metadata, but it may omit useful TOC sections such as
-        Answers. The fallback detector is deterministic and often catches those labels.
-        We merge only missing titles so we do not overwrite better LLM chapter names.
-        """
+        """Merge fallback TOC entries missing from LLM output without duplicating titles."""
         merged = [BookChapter(**c.to_dict()) for c in (primary or []) if c.chapter_title]
         seen = {self._chapter_title_key(c.chapter_title) for c in merged}
 
@@ -94,11 +96,49 @@ class LLMMetadataDetector:
             seen.add(key)
         return merged
 
+    def _should_prefer_rule_based_chapters(
+        self,
+        llm_chapters: list[BookChapter],
+        fallback_chapters: list[BookChapter],
+    ) -> bool:
+        """Prefer deterministic TOC when it looks reliable."""
+        if not self._fallback_toc_is_reliable(fallback_chapters):
+            return False
+        if not llm_chapters:
+            return True
+
+        fallback_count = len(fallback_chapters)
+        llm_count = len([c for c in llm_chapters if c.chapter_title])
+        if llm_count == 0:
+            return True
+
+        # Obvious over-splitting or under-splitting by LLM.
+        if llm_count > max(fallback_count + 8, int(fallback_count * 1.35)):
+            return True
+        if fallback_count >= 8 and llm_count < int(fallback_count * 0.65):
+            return True
+
+        llm_keys = {self._chapter_title_key(c.chapter_title) for c in llm_chapters if c.chapter_title}
+        fallback_keys = {self._chapter_title_key(c.chapter_title) for c in fallback_chapters if c.chapter_title}
+        matched = len(llm_keys & fallback_keys)
+        return fallback_count >= 8 and matched < max(3, int(fallback_count * 0.55))
+
+    def _fallback_toc_is_reliable(self, chapters: list[BookChapter]) -> bool:
+        if not chapters or len(chapters) < 5:
+            return False
+        printed = [c.printed_start_page for c in chapters if c.printed_start_page is not None]
+        if len(printed) < max(5, int(len(chapters) * 0.70)):
+            return False
+        increasing_pairs = sum(1 for a, b in zip(printed, printed[1:]) if b > a)
+        return increasing_pairs >= max(3, int((len(printed) - 1) * 0.80))
+
     @staticmethod
     def _chapter_title_key(title: str | None) -> str:
         if not title:
             return ""
-        return re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
+        key = re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
+        key = re.sub(r"\s+\d{1,4}$", "", key).strip()
+        return key
 
 
     def _build_prompt(self, pages: list[ExtractedPage], metadata: dict[str, Any], fallback: BookStructure) -> str:
@@ -231,7 +271,7 @@ class RuleBasedStructureDetector:
     """Cheap fallback that extracts common TOC lines without using an LLM."""
 
     TOC_LINE_RE = re.compile(
-        r"^\s*(?P<num>[0-9०-९]+|[IVXivx]+)?\s*[.)\-–:]?\s*(?P<title>[A-Za-z\u0900-\u097F][A-Za-z\u0900-\u097F0-9 ,&()\-/]+?)\s+(?P<page>[0-9०-९]{1,4})\s*$"
+        r"^\s*(?P<num>[0-9०-९]+|[IVXivx]+)?\s*[.)\-–:,]?\s*(?P<title>[A-Za-z\u0900-\u097F][A-Za-z\u0900-\u097F0-9 ,&()\-/]+?)\s+(?P<page>[0-9०-९]{1,4})\s*$"
     )
 
     def detect(self, pages: list[ExtractedPage], metadata: dict[str, Any]) -> BookStructure:
@@ -327,6 +367,11 @@ class RuleBasedStructureDetector:
 
         if len(titles) < 5:
             return []
+        # If OCR produced normal one-line TOC rows such as "1. Integers 1",
+        # this split-column parser will see many titles but no separate page-number
+        # column. In that case, return [] so _parse_toc_line handles the rows.
+        if len(page_numbers) < max(3, int(len(titles) * 0.50)):
+            return []
 
         chapters: list[BookChapter] = []
         for index, title in enumerate(titles, start=1):
@@ -341,16 +386,28 @@ class RuleBasedStructureDetector:
             )
         return chapters
 
-    def _clean_toc_title(self, line: str) -> str | None:
-        title = re.sub(r"^[0-9०-९]+\s*[.)\-–:]\s*", "", line).strip()
-        title = title.strip(" .:-–")
-        # Lines must contain real letters, not only OCR noise/numbers.
+    def _clean_toc_title(
+        self,
+        line: str,
+        *,
+        chapter_number: str | None = None,
+        printed_page: int | None = None,
+    ) -> str | None:
+        title = re.sub(r"^[0-9०-९]+\s*[.)\-–:,]\s*", "", line).strip()
+        if printed_page is not None:
+            title = re.sub(rf"\s+{printed_page}$", "", title).strip()
+        if chapter_number:
+            ch = _devanagari_int(str(chapter_number))
+            if ch is not None:
+                title = re.sub(rf"\s+{ch}$", "", title).strip()
+        title = title.strip(" .:-–,")
         alpha_count = len(re.findall(r"[A-Za-zऀ-ॿ]", title))
         if alpha_count < 3:
             return None
         if title.lower() in {"contents", "table of contents"}:
             return None
         return title
+
 
     def _is_roman_front_matter_marker(self, line: str) -> bool:
         return bool(re.fullmatch(r"\(?[ivxlcdm]+\)?", line.strip(), flags=re.I))
@@ -370,17 +427,18 @@ class RuleBasedStructureDetector:
         match = self.TOC_LINE_RE.match(clean)
         if not match:
             return None
-        title = match.group("title").strip(" .:-–")
-        if not title or title.lower() in {"contents", "table of contents"}:
-            return None
-        # Avoid lines that are mostly numbers/noise.
-        alpha_count = len(re.findall(r"[A-Za-z\u0900-\u097F]", title))
-        if alpha_count < 3:
+        printed_page = _devanagari_int(match.group("page"))
+        title = self._clean_toc_title(
+            match.group("title"),
+            chapter_number=match.group("num"),
+            printed_page=printed_page,
+        )
+        if not title:
             return None
         return BookChapter(
             chapter_number=match.group("num"),
             chapter_title=title,
-            printed_start_page=_devanagari_int(match.group("page")),
+            printed_start_page=printed_page,
             detected_by="rule_based_toc",
             confidence=0.55,
         )

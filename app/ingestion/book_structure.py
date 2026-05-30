@@ -110,20 +110,66 @@ def _clean_title(value: Any) -> str | None:
     return title or None
 
 
+def _clean_chapter_title_value(
+    value: Any,
+    *,
+    chapter_number: Any | None = None,
+    printed_start_page: int | None = None,
+) -> str | None:
+    """Clean chapter titles returned by an LLM or parsed from a noisy TOC.
+
+    OCR/LLM output frequently turns a TOC row like ``1. Integers 1`` into
+    title = ``Integers 1``. If we keep that value, the title scanner can match
+    the Contents page instead of the real chapter page and the printed-page
+    offset becomes wrong. This cleaner removes only isolated trailing numbers
+    that are clearly TOC/page artifacts. It intentionally does not remove
+    numbers embedded in real titles such as ``Three-Dimensional Shapes``.
+    """
+    title = _clean_title(value)
+    if not title:
+        return None
+
+    title = re.sub(r"\bpage\s+[0-9०-९]+$", "", title, flags=re.I).strip()
+
+    if printed_start_page is not None:
+        title = re.sub(rf"\s+{printed_start_page}$", "", title).strip()
+
+    chapter_num = _int_or_none(chapter_number)
+    if chapter_num is not None:
+        # Strip a duplicated chapter number at the end, e.g. ``Decimals 3``
+        # from the TOC row ``3. Decimals 3 36``. Require whitespace before
+        # the number so titles such as ``Test Paper-1`` are not damaged.
+        title = re.sub(rf"\s+{chapter_num}$", "", title).strip()
+
+    # Strip a leading chapter number accidentally included in the title.
+    if chapter_num is not None:
+        title = re.sub(rf"^\s*{chapter_num}\s*[.)\-–:,]+\s*", "", title).strip()
+
+    title = title.strip(" .:-–,")
+    return _clean_title(title)
+
+
 def structure_from_llm_json(data: dict[str, Any], *, detected_by: str, fallback_metadata: dict[str, Any]) -> BookStructure:
     chapters: list[BookChapter] = []
     for index, raw in enumerate(data.get("chapters") or [], start=1):
         if not isinstance(raw, dict):
             continue
-        title = _clean_title(raw.get("chapter_title") or raw.get("title") or raw.get("name"))
+
+        number = raw.get("chapter_number") or raw.get("number") or str(index)
+        printed_start_page = _int_or_none(raw.get("printed_start_page") or raw.get("start_page"))
+        title = _clean_chapter_title_value(
+            raw.get("chapter_title") or raw.get("title") or raw.get("name"),
+            chapter_number=number,
+            printed_start_page=printed_start_page,
+        )
         if not title:
             continue
-        number = raw.get("chapter_number") or raw.get("number") or str(index)
+
         chapters.append(
             BookChapter(
                 chapter_number=str(number) if number is not None and str(number).strip() else str(index),
                 chapter_title=title,
-                printed_start_page=_int_or_none(raw.get("printed_start_page") or raw.get("start_page")),
+                printed_start_page=printed_start_page,
                 printed_end_page=_int_or_none(raw.get("printed_end_page")),
                 pdf_start_page=_int_or_none(raw.get("pdf_start_page")),
                 pdf_end_page=_int_or_none(raw.get("pdf_end_page")),
@@ -266,24 +312,39 @@ def enrich_chapter_page_ranges(chapters: list[BookChapter], pages: list[Extracte
     # Step 3: if offset is known, map missing pdf pages from printed pages and repair printed pages.
     if offset is not None:
         for chapter in chapters:
-            if chapter.pdf_start_page is None and chapter.printed_start_page is not None:
-                calculated_pdf = chapter.printed_start_page + offset
-                if 1 <= calculated_pdf <= max_page:
-                    chapter.pdf_start_page = calculated_pdf
-                    chapter.metadata["pdf_start_page_source"] = "printed_page_offset"
-                    chapter.metadata["printed_to_pdf_offset"] = offset
-
-        # Recalculate printed pages from the trusted PDF start pages.
-        for chapter in chapters:
-            if chapter.pdf_start_page is None:
+            if chapter.printed_start_page is None:
                 continue
-            repaired_printed = chapter.pdf_start_page - offset
-            if repaired_printed >= 1:
-                if chapter.printed_start_page != repaired_printed:
-                    chapter.metadata["original_printed_start_page"] = chapter.printed_start_page
-                    chapter.metadata["printed_start_page_repaired"] = True
-                chapter.printed_start_page = repaired_printed
-                chapter.metadata["printed_page_source"] = "pdf_page_minus_offset"
+
+            calculated_pdf = chapter.printed_start_page + offset
+            if not (1 <= calculated_pdf <= max_page):
+                continue
+
+            candidate_text = page_text_by_number.get(calculated_pdf, "") or ""
+
+            # Prefer TOC printed-page + offset when that PDF page really starts with the chapter title.
+            # This fixes cases like:
+            # printed page 84 + offset 7 = PDF page 91 -> Exponents
+            candidate_matches_title = _page_head_matches_title(
+                chapter.chapter_title or "",
+                candidate_text,
+            )
+
+            if chapter.pdf_start_page is None:
+                chapter.pdf_start_page = calculated_pdf
+                chapter.metadata["pdf_start_page_source"] = "printed_page_offset"
+                chapter.metadata["printed_to_pdf_offset"] = offset
+                continue
+
+            # If title scan found a nearby but wrong page, correct it using TOC offset.
+            if (
+                    candidate_matches_title
+                    and abs((chapter.pdf_start_page or calculated_pdf) - calculated_pdf) <= 3
+                    and chapter.pdf_start_page != calculated_pdf
+            ):
+                chapter.metadata["original_pdf_start_page"] = chapter.pdf_start_page
+                chapter.metadata["pdf_start_page_repaired_by_toc_offset"] = True
+                chapter.pdf_start_page = calculated_pdf
+                chapter.metadata["pdf_start_page_source"] = "printed_page_offset_verified_by_heading"
                 chapter.metadata["printed_to_pdf_offset"] = offset
 
     # Step 4: recalculate pdf/printed end pages from next chapter start.
@@ -306,6 +367,33 @@ def enrich_chapter_page_ranges(chapters: list[BookChapter], pages: list[Extracte
     # Return all chapters, but sorted so mapped chapters drive ChapterResolver correctly.
     return normalize_chapters(chapters)
 
+def _page_head_matches_title(title: str, text: str) -> bool:
+    title_norm = _normalize_for_match(title)
+    if not title_norm or not text:
+        return False
+
+    head = "\n".join(text.splitlines()[:15])[:1200]
+    head_norm = _normalize_for_match(head)
+    head_norm_without_leading_number = re.sub(r"^\d+\s+", "", head_norm)
+
+    for line in head.splitlines()[:12]:
+        line_norm = _normalize_for_match(line)
+        if line_norm == title_norm:
+            return True
+        if _is_close_heading(line_norm, title_norm):
+            return True
+
+    title_pos = head_norm.find(title_norm)
+    title_pos_without_number = head_norm_without_leading_number.find(title_norm)
+
+    return (
+        head_norm.startswith(title_norm + " ")
+        or head_norm == title_norm
+        or head_norm_without_leading_number.startswith(title_norm + " ")
+        or head_norm_without_leading_number == title_norm
+        or 0 <= title_pos <= 80
+        or 0 <= title_pos_without_number <= 80
+    )
 
 def _has_title(chapters: list[BookChapter], title: str) -> bool:
     wanted = _normalize_for_match(title)
@@ -439,19 +527,29 @@ def _find_title_start_page(title: str, page_text_by_number: dict[int, str], *, m
     title_norm = _normalize_for_match(title)
     if not title_norm:
         return None
+
     for page_number in sorted(page_text_by_number):
         if page_number < min_page:
             continue
         text = page_text_by_number[page_number]
         if not text.strip():
             continue
-        head = "\n".join(text.splitlines()[:10])[:900]
+
+        # Never allow a Contents/Index page to become a chapter start. This was
+        # the reason page 6 (Contents) was being tagged as Chapter 1 and the
+        # printed page number became PDF page - 5 instead of PDF page - 7.
+        if _is_probable_contents_page(text):
+            continue
+
+        head = "\n".join(text.splitlines()[:12])[:1100]
         head_norm = _normalize_for_match(head)
         head_norm_without_leading_number = re.sub(r"^\d+\s+", "", head_norm)
 
         # Exact line/heading at top gets high confidence.
-        for line in head.splitlines()[:8]:
+        for line in head.splitlines()[:10]:
             line_norm = _normalize_for_match(line)
+            if not line_norm:
+                continue
             if line_norm == title_norm:
                 return page_number
             # OCR can slightly corrupt short headings, e.g. "Exponenis" for "Exponents".
@@ -474,6 +572,21 @@ def _find_title_start_page(title: str, page_text_by_number: dict[int, str], *, m
         ):
             return page_number
     return None
+
+
+
+def _is_probable_contents_page(text: str) -> bool:
+    lower = text.lower()
+    if re.search(r"\b(contents|table of contents|index)\b", lower) or "अनुक्रमणिका" in text or "विषय सूची" in text:
+        return True
+
+    # Some OCR layers miss the word Contents but contain many TOC-like rows.
+    lines = [" ".join(line.strip().split()) for line in text.splitlines() if line.strip()]
+    toc_like = 0
+    for line in lines[:80]:
+        if re.match(r"^\d{1,2}\s*[.)\-–:,]?\s+.{3,80}\s+\d{1,4}$", line):
+            toc_like += 1
+    return toc_like >= 6
 
 
 def _is_close_heading(line_norm: str, title_norm: str) -> bool:
