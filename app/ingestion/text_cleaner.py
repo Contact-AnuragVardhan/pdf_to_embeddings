@@ -12,7 +12,7 @@ class CleanResult:
 
 
 class TextCleaner:
-    CONTROL_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
+    CONTROL_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]")
     SPACE_RE = re.compile(r"[ \t\u00A0]+");
     BLANK_LINE_RE = re.compile(r"\n\s*\n\s*\n+")
     QUESTION_START_RE = re.compile(r"^\s*(\(?\d+\)?[.)]|[A-Da-d][.)]|[कखगघ][.)]|प्रश्न\s*\d*)")

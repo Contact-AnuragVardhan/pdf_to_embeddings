@@ -39,6 +39,23 @@ class Settings:
     log_level: str
     project_root: Path
 
+    # PDF/OCR preprocessing. OCRmyPDF is used before text extraction when the
+    # PDF is scanned or has a corrupted text layer.
+    pdf_preprocess_with_ocrmypdf: bool
+    pdf_preprocess_mode: str
+    pdf_ocrmypdf_strategy: str
+    pdf_ocr_cache_dir: str
+    pdf_ocr_lang: str
+    pdf_ocr_dpi: int
+    pdf_ocr_jobs: int | None
+    pdf_ocr_optimize: int
+    pdf_ocr_output_type: str
+    pdf_ocr_deskew: bool
+    pdf_ocr_rotate_pages: bool
+    pdf_ocr_clean: bool
+    pdf_ocr_invalidate_cache: bool
+    pdf_quality_sample_pages: int
+
     @classmethod
     def load(cls) -> "Settings":
         load_dotenv()
@@ -59,6 +76,20 @@ class Settings:
             reindex_existing=_as_bool(os.getenv("REINDEX_EXISTING"), False),
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
             project_root=Path(__file__).resolve().parent,
+            pdf_preprocess_with_ocrmypdf=_as_bool(os.getenv("PDF_PREPROCESS_WITH_OCRMYPDF"), True),
+            pdf_preprocess_mode=os.getenv("PDF_PREPROCESS_MODE", "auto").strip().lower(),
+            pdf_ocrmypdf_strategy=os.getenv("PDF_OCRMYPDF_STRATEGY", "force_ocr").strip().lower(),
+            pdf_ocr_cache_dir=os.getenv("PDF_OCR_CACHE_DIR", ".ocr_cache"),
+            pdf_ocr_lang=os.getenv("PDF_OCR_LANG", "auto").strip() or "auto",
+            pdf_ocr_dpi=_as_int(os.getenv("PDF_OCR_DPI"), 300),
+            pdf_ocr_jobs=None if not os.getenv("PDF_OCR_JOBS") else _as_int(os.getenv("PDF_OCR_JOBS"), 0),
+            pdf_ocr_optimize=_as_int(os.getenv("PDF_OCR_OPTIMIZE"), 1),
+            pdf_ocr_output_type=os.getenv("PDF_OCR_OUTPUT_TYPE", "pdf").strip() or "pdf",
+            pdf_ocr_deskew=_as_bool(os.getenv("PDF_OCR_DESKEW"), True),
+            pdf_ocr_rotate_pages=_as_bool(os.getenv("PDF_OCR_ROTATE_PAGES"), True),
+            pdf_ocr_clean=_as_bool(os.getenv("PDF_OCR_CLEAN"), False),
+            pdf_ocr_invalidate_cache=_as_bool(os.getenv("PDF_OCR_INVALIDATE_CACHE"), False),
+            pdf_quality_sample_pages=_as_int(os.getenv("PDF_QUALITY_SAMPLE_PAGES"), 25),
         )
 
     def validate_for_embedding(self) -> None:

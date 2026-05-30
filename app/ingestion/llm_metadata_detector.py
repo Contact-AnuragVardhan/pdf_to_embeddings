@@ -46,6 +46,9 @@ class LLMMetadataDetector:
                 detected_by=f"llm:{self.settings.openai_metadata_model}",
                 fallback_metadata=metadata,
             )
+            # Keep LLM metadata, but do not let it be the only source of structure.
+            # Fallback/rule-based detection may contain sections the LLM omitted, such as Answers.
+            structure.chapters = self._merge_missing_fallback_chapters(structure.chapters, fallback.chapters)
             structure.chapters = enrich_chapter_page_ranges(structure.chapters, pages)
             # Merge fallback chapters if LLM found none.
             if not structure.chapters and fallback.chapters:
@@ -66,6 +69,37 @@ class LLMMetadataDetector:
         structure.book_title = structure.book_title or metadata.get("book_title") or metadata.get("title")
         structure.primary_language = metadata.get("language") or structure.primary_language
         return structure
+
+    def _merge_missing_fallback_chapters(
+        self,
+        primary: list[BookChapter],
+        fallback: list[BookChapter],
+    ) -> list[BookChapter]:
+        """Merge rule-based chapters/sections missing from LLM output.
+
+        LLM output is useful for metadata, but it may omit useful TOC sections such as
+        Answers. The fallback detector is deterministic and often catches those labels.
+        We merge only missing titles so we do not overwrite better LLM chapter names.
+        """
+        merged = [BookChapter(**c.to_dict()) for c in (primary or []) if c.chapter_title]
+        seen = {self._chapter_title_key(c.chapter_title) for c in merged}
+
+        for chapter in fallback or []:
+            key = self._chapter_title_key(chapter.chapter_title)
+            if not key or key in seen:
+                continue
+            cloned = BookChapter(**chapter.to_dict())
+            cloned.metadata["merged_from_fallback"] = True
+            merged.append(cloned)
+            seen.add(key)
+        return merged
+
+    @staticmethod
+    def _chapter_title_key(title: str | None) -> str:
+        if not title:
+            return ""
+        return re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
+
 
     def _build_prompt(self, pages: list[ExtractedPage], metadata: dict[str, Any], fallback: BookStructure) -> str:
         samples = self._sample_pages_for_prompt(pages)
@@ -89,6 +123,7 @@ class LLMMetadataDetector:
                     "printed_start_page is the page number printed in the book/table of contents.",
                     "pdf_start_page is the actual PDF page number if visible from the provided samples; if you cannot know it, return null.",
                     "For different publishers/languages, infer chapters from Contents/Index/Table of Contents/अनुक्रमणिका/विषय सूची/সূচিপত্র when present.",
+                    "Include answer-key sections such as Answers as a pseudo-chapter if they appear in the table of contents.",
                     "Prefer deterministic, citation-friendly structure over creative guesses.",
                     "Recommend chunk settings based on content type: math/question books should usually have smaller chunks; literature/story books larger chunks; grammar/rule books medium chunks.",
                 ],
@@ -205,6 +240,15 @@ class RuleBasedStructureDetector:
             text = page.cleaned_text or ""
             if not self._looks_like_contents_page(text):
                 continue
+
+            # First handle PDFs where TOC extraction returns one title column followed
+            # by one page-number column. R.S. Aggarwal style PDFs often extract this way.
+            split_column_chapters = self._parse_split_column_toc(text)
+            if split_column_chapters:
+                chapters.extend(split_column_chapters)
+                continue
+
+            # Fallback for normal one-line entries like "1. Integers 1".
             for line in text.splitlines():
                 parsed = self._parse_toc_line(line)
                 if not parsed:
@@ -240,13 +284,84 @@ class RuleBasedStructureDetector:
 
     def _looks_like_contents_page(self, text: str) -> bool:
         lower = text.lower()
+        # Be conservative: do not classify copyright/preface pages as TOC just because
+        # several lines end in numbers such as "First edition 1993".
         return (
             "contents" in lower
             or "table of contents" in lower
             or "अनुक्रमणिका" in text
             or "विषय सूची" in text
-            or sum(1 for line in text.splitlines() if self._parse_toc_line(line)) >= 5
         )
+
+    def _parse_split_column_toc(self, text: str) -> list[BookChapter]:
+        """Parse TOC text extracted as all titles first, then all page numbers."""
+        raw_lines = [" ".join(line.strip().split()) for line in text.splitlines()]
+        lines = [line for line in raw_lines if line]
+        try:
+            start = next(i for i, line in enumerate(lines) if "contents" in line.lower() or "अनुक्रमणिका" in line or "विषय सूची" in line)
+        except StopIteration:
+            return []
+
+        body = lines[start + 1:]
+        titles: list[str] = []
+        page_numbers: list[int | None] = []
+        collecting_numbers = False
+
+        for line in body:
+            if self._is_roman_front_matter_marker(line):
+                collecting_numbers = True
+                continue
+
+            if self._is_page_number_token(line):
+                collecting_numbers = True
+                page_numbers.append(_devanagari_int(line))
+                continue
+
+            if collecting_numbers:
+                # Once page-number column starts, ignore OCR leftovers.
+                continue
+
+            title = self._clean_toc_title(line)
+            if title:
+                titles.append(title)
+
+        if len(titles) < 5:
+            return []
+
+        chapters: list[BookChapter] = []
+        for index, title in enumerate(titles, start=1):
+            chapters.append(
+                BookChapter(
+                    chapter_number=str(index),
+                    chapter_title=title,
+                    printed_start_page=page_numbers[index - 1] if index - 1 < len(page_numbers) else None,
+                    detected_by="rule_based_split_column_toc",
+                    confidence=0.62,
+                )
+            )
+        return chapters
+
+    def _clean_toc_title(self, line: str) -> str | None:
+        title = re.sub(r"^[0-9०-९]+\s*[.)\-–:]\s*", "", line).strip()
+        title = title.strip(" .:-–")
+        # Lines must contain real letters, not only OCR noise/numbers.
+        alpha_count = len(re.findall(r"[A-Za-zऀ-ॿ]", title))
+        if alpha_count < 3:
+            return None
+        if title.lower() in {"contents", "table of contents"}:
+            return None
+        return title
+
+    def _is_roman_front_matter_marker(self, line: str) -> bool:
+        return bool(re.fullmatch(r"\(?[ivxlcdm]+\)?", line.strip(), flags=re.I))
+
+    def _is_page_number_token(self, line: str) -> bool:
+        cleaned = line.strip()
+        if len(cleaned) > 8:
+            return False
+        alpha_count = len(re.findall(r"[A-Za-zऀ-ॿ]", cleaned))
+        digit_count = len(re.findall(r"[0-9०-९]", cleaned))
+        return digit_count > 0 and alpha_count == 0
 
     def _parse_toc_line(self, line: str) -> BookChapter | None:
         clean = " ".join(line.strip().split())
@@ -256,7 +371,7 @@ class RuleBasedStructureDetector:
         if not match:
             return None
         title = match.group("title").strip(" .:-–")
-        if not title or title.lower() in {"contents", "answers"}:
+        if not title or title.lower() in {"contents", "table of contents"}:
             return None
         # Avoid lines that are mostly numbers/noise.
         alpha_count = len(re.findall(r"[A-Za-z\u0900-\u097F]", title))

@@ -31,3 +31,5 @@ build/
 *.egg-info/
 logs/
 *.log
+
+.ocr_cache/

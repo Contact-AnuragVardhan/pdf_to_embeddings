@@ -11,6 +11,7 @@ from config import Settings
 from db.migrations import init_schema
 from ingestion.ingest_service import IngestService
 from ingestion.path_metadata import derive_metadata_from_path, merge_metadata
+from ingestion.pdf_preprocessor import PdfPreprocessor
 from ingestion.repository import RagRepository
 from ingestion.validators import validate_ingest_args
 from search.rag_search import RagSearchService
@@ -48,7 +49,12 @@ def build_parser() -> argparse.ArgumentParser:
     init_db = sub.add_parser("init-db", help="Create/upgrade PostgreSQL schema.")
     init_db.set_defaults(handler=handle_init_db)
 
-    ingest = sub.add_parser("ingest", help="Ingest one readable PDF.")
+    preprocess = sub.add_parser("preprocess-pdf", help="Create/search cache for a searchable PDF using OCRmyPDF when needed.")
+    preprocess.add_argument("--pdf", required=True, help="Path to input PDF.")
+    add_metadata_args(preprocess)
+    preprocess.set_defaults(handler=handle_preprocess_pdf)
+
+    ingest = sub.add_parser("ingest", help="Ingest one PDF. OCRmyPDF preprocessing runs automatically when needed.")
     ingest.add_argument("--pdf", required=True, help="Path to a readable/selectable PDF.")
     add_metadata_args(ingest)
     ingest.add_argument("--reindex", action="store_true", help="Delete existing document by file_hash and ingest again.")
@@ -120,6 +126,29 @@ def metadata_from_args(
 def handle_init_db(args: argparse.Namespace, settings: Settings) -> None:
     init_schema(settings.database_url, settings.project_root / "db" / "schema.sql")
     console.print("[green]Database schema initialized successfully.[/green]")
+
+
+def handle_preprocess_pdf(args: argparse.Namespace, settings: Settings) -> None:
+    pdf_path = Path(args.pdf)
+    metadata = metadata_from_args(args, pdf_path=pdf_path, title_fallback=pdf_path.stem)
+    preprocessor = PdfPreprocessor.from_settings(settings)
+    result = preprocessor.prepare(pdf_path, metadata=metadata)
+    console.print_json(
+        json=json.dumps(
+            {
+                "original_pdf": str(result.original_pdf),
+                "pdf_for_extraction": str(result.pdf_for_extraction),
+                "used_ocr": result.used_ocr,
+                "ocr_language": result.ocr_language,
+                "ocr_output_pdf": str(result.ocr_output_pdf) if result.ocr_output_pdf else None,
+                "quality_report": result.quality_report.__dict__,
+                "warnings": result.warnings,
+            },
+            default=str,
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
 
 def handle_ingest(args: argparse.Namespace, settings: Settings) -> None:

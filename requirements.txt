@@ -8,3 +8,6 @@ tiktoken>=0.7.0
 tenacity>=8.5.0
 rich>=13.7.0
 langdetect>=1.0.9
+pytesseract>=0.3.13
+Pillow>=10.4.0
+ocrmypdf>=17.0.0

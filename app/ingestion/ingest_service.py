@@ -13,6 +13,7 @@ from ingestion.language_detector import LanguageDetector
 from ingestion.llm_metadata_detector import LLMMetadataDetector
 from ingestion.metadata_builder import MetadataBuilder
 from ingestion.pdf_extractor import PDFTextExtractor
+from ingestion.pdf_preprocessor import PdfPreprocessor
 from ingestion.repository import RagRepository
 from ingestion.structure_detector import StructureDetector
 from ingestion.text_cleaner import TextCleaner
@@ -32,6 +33,7 @@ class IngestService:
         self.metadata_builder = MetadataBuilder(self.token_counter, self.language_detector)
         self.structure_detector = StructureDetector()
         self.extractor = PDFTextExtractor(self.cleaner, self.language_detector, self.token_counter)
+        self.preprocessor = PdfPreprocessor.from_settings(settings)
         self.metadata_detector = LLMMetadataDetector(settings)
         self.chunking_selector = ChunkingStrategySelector(
             default_max_tokens=settings.chunk_max_tokens,
@@ -40,8 +42,8 @@ class IngestService:
         )
 
     def ingest_pdf(self, pdf_path: Path, metadata: dict[str, Any], *, reindex: bool = False, dry_run: bool = False) -> dict[str, Any]:
-        pdf_path = pdf_path.resolve()
-        file_hash = sha256_file(pdf_path)
+        original_pdf_path = pdf_path.resolve()
+        file_hash = sha256_file(original_pdf_path)
         reindex = reindex or self.settings.reindex_existing
 
         if not dry_run:
@@ -59,9 +61,23 @@ class IngestService:
         document_id: str | None = None
         try:
             if not dry_run:
-                run_id = self.repository.create_ingestion_run(file_path=str(pdf_path), file_hash=file_hash, metadata=metadata)
+                run_id = self.repository.create_ingestion_run(file_path=str(original_pdf_path), file_hash=file_hash, metadata=metadata)
 
-            pages, extraction_warnings = self.extractor.extract(pdf_path)
+            preprocess_result = self.preprocessor.prepare(original_pdf_path, metadata=metadata)
+            extraction_pdf_path = preprocess_result.pdf_for_extraction
+            if preprocess_result.used_ocr:
+                warnings.append(
+                    f"OCRmyPDF preprocessing used ({preprocess_result.ocr_language}): {preprocess_result.quality_report.reason}"
+                )
+            metadata = dict(metadata)
+            metadata["original_pdf_path"] = str(preprocess_result.original_pdf)
+            metadata["pdf_for_extraction"] = str(preprocess_result.pdf_for_extraction)
+            metadata["ocr_preprocessing_used"] = preprocess_result.used_ocr
+            metadata["ocr_language"] = preprocess_result.ocr_language
+            metadata["ocr_quality_report"] = preprocess_result.quality_report.__dict__
+
+            pages, extraction_warnings = self.extractor.extract(extraction_pdf_path)
+            warnings.extend(preprocess_result.warnings)
             warnings.extend(extraction_warnings)
             pages_count = len(pages)
 
@@ -81,7 +97,11 @@ class IngestService:
             if dry_run:
                 return {
                     "status": "dry_run_ok",
-                    "file": str(pdf_path),
+                    "file": str(original_pdf_path),
+                    "pdf_for_extraction": str(extraction_pdf_path),
+                    "ocr_preprocessing_used": preprocess_result.used_ocr,
+                    "ocr_language": preprocess_result.ocr_language,
+                    "ocr_quality_report": preprocess_result.quality_report.__dict__,
                     "file_hash": file_hash,
                     "pages_extracted": pages_count,
                     "chunks_created": chunks_count,
@@ -106,7 +126,7 @@ class IngestService:
                 }
 
             document = self._build_document_record(
-                pdf_path=pdf_path,
+                pdf_path=original_pdf_path,
                 file_hash=file_hash,
                 metadata=metadata,
                 book_structure=book_structure,
@@ -143,7 +163,11 @@ class IngestService:
             return {
                 "status": "completed",
                 "document_id": document_id,
-                "file": str(pdf_path),
+                "file": str(original_pdf_path),
+                "pdf_for_extraction": str(extraction_pdf_path),
+                "ocr_preprocessing_used": preprocess_result.used_ocr,
+                "ocr_language": preprocess_result.ocr_language,
+                "ocr_quality_report": preprocess_result.quality_report.__dict__,
                 "file_hash": file_hash,
                 "pages_extracted": pages_count,
                 "chunks_created": chunks_count,
@@ -158,7 +182,7 @@ class IngestService:
                 "summary": self.repository.get_document_summary(document_id=document_id),
             }
         except Exception as exc:
-            logger.exception("Ingestion failed for %s", pdf_path)
+            logger.exception("Ingestion failed for %s", original_pdf_path)
             if run_id:
                 self.repository.finish_ingestion_run(
                     run_id,
