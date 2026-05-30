@@ -8,8 +8,10 @@ from dataclasses import dataclass, field
 class StructureState:
     chapter_number: str | None = None
     chapter_title: str | None = None
+    unit_number: str | None = None
     unit_title: str | None = None
     lesson_title: str | None = None
+    section_number: str | None = None
     section_title: str | None = None
     subsection_title: str | None = None
     topic: str | None = None
@@ -88,10 +90,17 @@ class StructureDetector:
             data["subsection_title"] = None
             data["topic"] = None
             data["subtopic"] = None
-        elif heading.level in {"unit_title", "lesson_title"}:
+        elif heading.level == "unit_title":
+            data["unit_number"] = heading.number
             data["section_title"] = None
+            data["section_number"] = None
+            data["topic"] = None
+        elif heading.level == "lesson_title":
+            data["section_title"] = None
+            data["section_number"] = None
             data["topic"] = None
         elif heading.level == "section_title":
+            data["section_number"] = heading.number
             data["topic"] = heading.title
         elif heading.level == "topic":
             data["topic"] = heading.title

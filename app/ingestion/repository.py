@@ -121,24 +121,24 @@ class RagRepository:
             return
         sql = """
         INSERT INTO embeddings_book_chapters(
-            document_id, chapter_number, chapter_title, printed_start_page, printed_end_page,
-            pdf_start_page, pdf_end_page, detected_by, confidence, metadata
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
-        ON CONFLICT(document_id, chapter_number, chapter_title) DO UPDATE SET
-            printed_start_page=EXCLUDED.printed_start_page,
-            printed_end_page=EXCLUDED.printed_end_page,
-            pdf_start_page=EXCLUDED.pdf_start_page,
-            pdf_end_page=EXCLUDED.pdf_end_page,
-            detected_by=EXCLUDED.detected_by,
-            confidence=EXCLUDED.confidence,
-            metadata=EXCLUDED.metadata,
-            updated_at=now()
+            document_id, chapter_number, chapter_title, unit_number, unit_title,
+            section_number, section_title, lesson_title, structure_type,
+            printed_start_page, printed_end_page, pdf_start_page, pdf_end_page,
+            detected_by, confidence, metadata
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+        ON CONFLICT DO NOTHING
         """
         params = [
             (
                 document_id,
                 c.chapter_number,
                 c.chapter_title,
+                c.unit_number,
+                c.unit_title,
+                c.section_number,
+                c.section_title,
+                c.lesson_title,
+                c.structure_type,
                 c.printed_start_page,
                 c.printed_end_page,
                 c.pdf_start_page,
@@ -148,9 +148,10 @@ class RagRepository:
                 _json(c.metadata or {}),
             )
             for c in chapters
-            if c.chapter_title
+            if c.display_title
         ]
         with get_connection(self.database_url) as conn, conn.transaction():
+            conn.execute("DELETE FROM embeddings_book_chapters WHERE document_id=%s", (document_id,))
             with conn.cursor() as cur:
                 cur.executemany(sql, params)
 
@@ -195,8 +196,8 @@ class RagRepository:
         columns = [
             "document_id", "page_start", "page_end", "chunk_index", "book_title", "school_name", "class_name",
             "subject", "grade", "board", "medium", "language", "detected_language", "chapter_number",
-            "chapter_title", "unit_title", "lesson_title",
-            "section_title", "subsection_title", "topic", "subtopic", "chunk_type", "content_domain", "difficulty_level",
+            "chapter_title", "unit_number", "unit_title", "lesson_title",
+            "section_number", "section_title", "subsection_title", "topic", "subtopic", "chunk_type", "content_domain", "difficulty_level",
             "pedagogical_role", "content", "content_clean", "content_for_embedding", "summary", "keywords", "important_terms",
             "formulas", "numbers", "question_types", "word_count", "token_count", "char_count", "has_formula",
             "has_numbers", "has_questions", "has_exercises", "has_examples", "has_definition", "has_table_like_text",
@@ -258,8 +259,8 @@ class RagRepository:
                 c for c in chunks
                 if int(c.get("page_start") or 0) <= page_number <= int(c.get("page_end") or 0)
             ]
-            # Prefer a chunk with chapter info, then any chunk covering the page.
-            matching.sort(key=lambda c: 0 if c.get("chapter_title") else 1)
+            # Prefer a chunk with structure info, then any chunk covering the page.
+            matching.sort(key=lambda c: 0 if (c.get("chapter_title") or c.get("section_title") or c.get("unit_title")) else 1)
             if matching:
                 return matching[0]
             return {}
@@ -267,10 +268,12 @@ class RagRepository:
         sql = """
         INSERT INTO embeddings_raw_text_pages(
             document_id, school_name, class_name, grade, subject, book_title,
-            chapter_number, chapter_title, page_number, printed_page_number, raw_text, cleaned_text,
+            chapter_number, chapter_title, unit_number, unit_title, lesson_title,
+            section_number, section_title, subsection_title, topic, subtopic,
+            page_number, printed_page_number, raw_text, cleaned_text,
             detected_language, word_count, token_count, metadata
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb
         )
         ON CONFLICT(document_id, page_number) DO UPDATE SET
             school_name=EXCLUDED.school_name,
@@ -280,6 +283,14 @@ class RagRepository:
             book_title=EXCLUDED.book_title,
             chapter_number=EXCLUDED.chapter_number,
             chapter_title=EXCLUDED.chapter_title,
+            unit_number=EXCLUDED.unit_number,
+            unit_title=EXCLUDED.unit_title,
+            lesson_title=EXCLUDED.lesson_title,
+            section_number=EXCLUDED.section_number,
+            section_title=EXCLUDED.section_title,
+            subsection_title=EXCLUDED.subsection_title,
+            topic=EXCLUDED.topic,
+            subtopic=EXCLUDED.subtopic,
             printed_page_number=EXCLUDED.printed_page_number,
             raw_text=EXCLUDED.raw_text,
             cleaned_text=EXCLUDED.cleaned_text,
@@ -299,6 +310,9 @@ class RagRepository:
                 "file_metadata_source": metadata.get("path_metadata_source"),
                 "printed_page_number": printed_page_number,
                 "chapter_detection_source": chapter.get("detected_by"),
+                "structure_type": chapter.get("structure_type"),
+                "unit_title": chapter.get("unit_title"),
+                "section_title": chapter.get("section_title"),
             })
             params.append(
                 (
@@ -310,6 +324,14 @@ class RagRepository:
                     metadata.get("book_title") or metadata.get("title"),
                     chapter.get("chapter_number"),
                     chapter.get("chapter_title"),
+                    chapter.get("unit_number"),
+                    chapter.get("unit_title"),
+                    chapter.get("lesson_title"),
+                    chapter.get("section_number"),
+                    chapter.get("section_title"),
+                    chapter.get("subsection_title"),
+                    chapter.get("topic"),
+                    chapter.get("subtopic"),
                     page_number,
                     printed_page_number,
                     page.get("raw_text"),
@@ -380,7 +402,7 @@ class RagRepository:
         sql = f"""
         SELECT c.id::text AS chunk_id,
                c.content, c.content_clean, c.book_title, c.school_name, c.class_name, c.subject, c.grade, c.language,
-               c.chapter_title, c.section_title, c.topic, c.chunk_type, c.page_start, c.page_end,
+               c.chapter_title, c.unit_title, c.lesson_title, c.section_title, c.topic, c.chunk_type, c.page_start, c.page_end,
                c.source_label, c.citation_text,
                GREATEST(0, 1 - (v.embedding <=> %s::vector)) AS vector_score,
                0.0::float AS keyword_score
@@ -403,7 +425,7 @@ class RagRepository:
         sql = f"""
         SELECT c.id::text AS chunk_id,
                c.content, c.content_clean, c.book_title, c.school_name, c.class_name, c.subject, c.grade, c.language,
-               c.chapter_title, c.section_title, c.topic, c.chunk_type, c.page_start, c.page_end,
+               c.chapter_title, c.unit_title, c.lesson_title, c.section_title, c.topic, c.chunk_type, c.page_start, c.page_end,
                c.source_label, c.citation_text,
                0.0::float AS vector_score,
                ts_rank_cd(c.search_vector, websearch_to_tsquery('simple', %s))::float AS keyword_score
@@ -431,5 +453,11 @@ class RagRepository:
         if filters.get("chapter_title"):
             clauses.append(f"{table_alias}.chapter_title ILIKE %s")
             params.append(f"%{filters['chapter_title']}%")
+        if filters.get("unit_title"):
+            clauses.append(f"{table_alias}.unit_title ILIKE %s")
+            params.append(f"%{filters['unit_title']}%")
+        if filters.get("section_title"):
+            clauses.append(f"{table_alias}.section_title ILIKE %s")
+            params.append(f"%{filters['section_title']}%")
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
         return where, params

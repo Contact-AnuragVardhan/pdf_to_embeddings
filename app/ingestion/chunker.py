@@ -79,16 +79,21 @@ class MeaningfulChunker:
                 continue
             # Prefer TOC/LLM page-to-chapter mapping over fragile heading regex.
             page_state = resolver.structure_for_page(page.page_number) if resolver else StructureState()
-            if page_state.chapter_title:
+            if self._has_structure_boundary(page_state):
                 state = page_state
             paragraphs = self._split_paragraphs(page.cleaned_text)
             for para in paragraphs:
                 heading = self.structure_detector.detect_heading(para)
                 state = self.structure_detector.update_state(state, heading)
                 # Do not let generic topic headings erase the LLM/TOC chapter mapping.
-                if page_state.chapter_title:
+                if self._has_structure_boundary(page_state):
                     state.chapter_number = page_state.chapter_number
                     state.chapter_title = page_state.chapter_title
+                    state.unit_number = page_state.unit_number
+                    state.unit_title = page_state.unit_title
+                    state.lesson_title = page_state.lesson_title
+                    state.section_number = page_state.section_number
+                    state.section_title = page_state.section_title
                 units.append(ParagraphUnit(para, page.page_number, StructureState(**state.as_dict())))
         return units
 
@@ -118,11 +123,20 @@ class MeaningfulChunker:
         return paragraphs
 
     def _starts_new_chapter(self, unit: ParagraphUnit, current: list[ParagraphUnit]) -> bool:
+        # Backward-compatible name: this now detects section/unit boundaries too.
         if not current:
             return False
-        return bool(
-            unit.structure.chapter_title
-            and unit.structure.chapter_title != current[-1].structure.chapter_title
+        return self._structure_key(unit.structure) != self._structure_key(current[-1].structure)
+
+    def _has_structure_boundary(self, structure: StructureState) -> bool:
+        return bool(structure.chapter_title or structure.section_title or structure.lesson_title or structure.unit_title)
+
+    def _structure_key(self, structure: StructureState) -> tuple[str | None, str | None, str | None, str | None]:
+        return (
+            structure.chapter_title,
+            structure.unit_title,
+            structure.lesson_title,
+            structure.section_title,
         )
 
     def _split_large_unit(self, unit: ParagraphUnit) -> list[ParagraphUnit]:
@@ -157,7 +171,9 @@ class MeaningfulChunker:
         is_small_but_useful = classification.chunk_type in {"formula", "definition", "table", "vocabulary", "grammar_rule"}
         if token_count < self.min_useful_tokens and chunks and not is_small_but_useful:
             prev = chunks[-1]
-            if prev.get("chapter_title") == units[0].structure.chapter_title and prev["token_count"] + token_count <= self.max_tokens:
+            prev_key = (prev.get("chapter_title"), prev.get("unit_title"), prev.get("lesson_title"), prev.get("section_title"))
+            unit_key = self._structure_key(units[0].structure)
+            if prev_key == unit_key and prev["token_count"] + token_count <= self.max_tokens:
                 prev["content"] += "\n\n" + content
                 prev["content_clean"] = prev["content"]
                 prev["page_end"] = max(prev["page_end"], units[-1].page_number)

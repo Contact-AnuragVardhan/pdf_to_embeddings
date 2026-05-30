@@ -107,13 +107,22 @@ class ChunkingStrategySelector:
             if question_hits > 30:
                 return "math_textbook"
             return "math_textbook"
+
+        # Trust explicit subject metadata before generic keyword counts. English
+        # literature books contain many words such as activity/observe, which can
+        # otherwise be misclassified as science_textbook.
+        if "english" in subject or "literature" in subject:
+            return "english_literature"
+        if "hindi" in subject:
+            return "hindi_literature"
+
         if question_hits > 60 and token_total < 12000:
             return "question_bank"
-        if any(x in subject for x in ["science", "evs"]) or science_hits >= 4:
-            return "science_textbook"
         if "grammar" in subject or grammar_hits >= 4:
             return "grammar"
-        if story_hits >= 2 or "literature" in subject or "english" in subject:
+        if any(x in subject for x in ["science", "evs"]) or science_hits >= 4:
+            return "science_textbook"
+        if story_hits >= 2:
             return "hindi_literature" if devanagari_chars > latin_chars else "english_literature"
         if devanagari_chars and latin_chars and min(devanagari_chars, latin_chars) / max(devanagari_chars, latin_chars) > 0.15:
             return "mixed_textbook"

@@ -14,8 +14,17 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class BookChapter:
+    # Backward-compatible structure record. For normal textbooks these fields
+    # represent chapters. For books like NCERT Poorvi, chapter_* intentionally
+    # remains NULL and the record represents a unit/section lesson from the TOC.
     chapter_number: str | None = None
     chapter_title: str | None = None
+    unit_number: str | None = None
+    unit_title: str | None = None
+    section_number: str | None = None
+    section_title: str | None = None
+    lesson_title: str | None = None
+    structure_type: str = "chapter"  # chapter | section | unit | lesson | answers
     printed_start_page: int | None = None
     printed_end_page: int | None = None
     pdf_start_page: int | None = None
@@ -24,10 +33,24 @@ class BookChapter:
     detected_by: str = "unknown"
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def display_title(self) -> str | None:
+        return self.chapter_title or self.section_title or self.lesson_title or self.unit_title
+
+    @property
+    def display_number(self) -> str | None:
+        return self.chapter_number or self.section_number or self.unit_number
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "chapter_number": self.chapter_number,
             "chapter_title": self.chapter_title,
+            "unit_number": self.unit_number,
+            "unit_title": self.unit_title,
+            "section_number": self.section_number,
+            "section_title": self.section_title,
+            "lesson_title": self.lesson_title,
+            "structure_type": self.structure_type,
             "printed_start_page": self.printed_start_page,
             "printed_end_page": self.printed_end_page,
             "pdf_start_page": self.pdf_start_page,
@@ -183,6 +206,43 @@ def structure_from_llm_json(data: dict[str, Any], *, detected_by: str, fallback_
             )
         )
 
+    # Optional schema for books that do not call lessons "chapters". Keep
+    # chapter_number/chapter_title NULL and store unit/section instead.
+    for index, raw in enumerate(data.get("sections") or [], start=1):
+        if not isinstance(raw, dict):
+            continue
+        printed_start_page = _int_or_none(raw.get("printed_start_page") or raw.get("start_page"))
+        section_title = _clean_chapter_title_value(
+            raw.get("section_title") or raw.get("lesson_title") or raw.get("title") or raw.get("name"),
+            chapter_number=None,
+            printed_start_page=printed_start_page,
+        )
+        if not section_title:
+            continue
+        chapters.append(
+            BookChapter(
+                chapter_number=None,
+                chapter_title=None,
+                unit_number=_clean_title(raw.get("unit_number")),
+                unit_title=_clean_title(raw.get("unit_title")),
+                section_number=_clean_title(raw.get("section_number") or str(index)),
+                section_title=section_title,
+                lesson_title=_clean_title(raw.get("lesson_title")),
+                structure_type="section",
+                printed_start_page=printed_start_page,
+                printed_end_page=_int_or_none(raw.get("printed_end_page")),
+                pdf_start_page=_int_or_none(raw.get("pdf_start_page")),
+                pdf_end_page=_int_or_none(raw.get("pdf_end_page")),
+                confidence=_float_or_none(raw.get("confidence")) or _float_or_none(data.get("confidence")),
+                detected_by=detected_by,
+                metadata={k: v for k, v in raw.items() if k not in {
+                    "unit_number", "unit_title", "section_number", "section_title",
+                    "lesson_title", "title", "name", "printed_start_page", "start_page",
+                    "printed_end_page", "pdf_start_page", "pdf_end_page", "confidence",
+                }},
+            )
+        )
+
     languages = data.get("languages_detected") or data.get("languages") or []
     if isinstance(languages, str):
         languages = [x.strip() for x in languages.split(",") if x.strip()]
@@ -214,15 +274,24 @@ def structure_from_llm_json(data: dict[str, Any], *, detected_by: str, fallback_
 
 
 def normalize_chapters(chapters: list[BookChapter]) -> list[BookChapter]:
-    valid = [c for c in chapters if c.chapter_title]
+    # The name stays normalize_chapters for backward compatibility, but the list
+    # can also contain section-level structures. A valid structure has at least
+    # one display title. For section books, chapter fields are intentionally None.
+    valid = [c for c in chapters if c.display_title]
     valid.sort(key=lambda c: (
         c.pdf_start_page if c.pdf_start_page is not None else 10**9,
         c.printed_start_page if c.printed_start_page is not None else 10**9,
+        c.unit_number or "",
         _int_or_none(c.chapter_number) if _int_or_none(c.chapter_number) is not None else 10**9,
-        c.chapter_title or "",
+        _int_or_none(c.section_number) if _int_or_none(c.section_number) is not None else 10**9,
+        c.display_title or "",
     ))
     for index, chapter in enumerate(valid):
-        if not chapter.chapter_number:
+        if not chapter.structure_type:
+            chapter.structure_type = "section" if chapter.section_title and not chapter.chapter_title else "chapter"
+        # Only auto-fill chapter_number for actual chapter records. For books like
+        # Poorvi, chapter_number must remain NULL because structure is section-based.
+        if chapter.structure_type == "chapter" and chapter.chapter_title and not chapter.chapter_number:
             chapter.chapter_number = str(index + 1)
     return valid
 
@@ -251,7 +320,7 @@ def enrich_chapter_page_ranges(chapters: list[BookChapter], pages: list[Extracte
     max_page = max(page_text_by_number) if page_text_by_number else 0
 
     # Clone chapters so callers do not see surprising partial mutations.
-    cloned = [BookChapter(**c.to_dict()) for c in (chapters or []) if c.chapter_title]
+    cloned = [BookChapter(**c.to_dict()) for c in (chapters or []) if c.display_title]
 
     # If Answers is missing, try to add it from the actual pages. This is a fallback;
     # the preferred path is that RuleBasedStructureDetector parses "Answers" from TOC.
@@ -281,7 +350,7 @@ def enrich_chapter_page_ranges(chapters: list[BookChapter], pages: list[Extracte
     last_found = 0
     for chapter in chapters:
         scan_from = max(1, last_found + 1)
-        found = _find_title_start_page(chapter.chapter_title or "", page_text_by_number, min_page=scan_from)
+        found = _find_title_start_page(chapter.display_title or "", page_text_by_number, min_page=scan_from)
         if found:
             if chapter.pdf_start_page != found:
                 chapter.metadata["original_pdf_start_page"] = chapter.pdf_start_page
@@ -299,15 +368,37 @@ def enrich_chapter_page_ranges(chapters: list[BookChapter], pages: list[Extracte
     answers_start = _detect_answers_start_page(page_text_by_number)
     if answers_start:
         for chapter in chapters:
-            if _normalize_for_match(chapter.chapter_title or "") in {"answer", "answers"}:
+            if _normalize_for_match(chapter.display_title or "") in {"answer", "answers"}:
                 if chapter.pdf_start_page is None or answers_start < chapter.pdf_start_page:
                     chapter.metadata["original_pdf_start_page"] = chapter.pdf_start_page
                     chapter.pdf_start_page = answers_start
                     chapter.metadata["pdf_start_page_source"] = "answers_page_heuristic"
 
     # Step 2: determine offset between printed page and PDF page.
+    #
+    # For section-based books such as NCERT Poorvi, headings can repeat later in
+    # transcript/listening pages. A pure title scan may therefore map early
+    # sections to later transcript pages (for example, A Bottle of Dew -> page 52
+    # instead of page 17). Before using the generic offset inference, detect the
+    # dominant printed->PDF offset from near-top heading matches and force that
+    # offset for all unit/section records. This path is section-only, so it does
+    # not affect chapter-based books such as the maths book.
+    section_offset = _infer_section_printed_to_pdf_offset(chapters, page_text_by_number, max_page)
+    if section_offset is not None:
+        for chapter in chapters:
+            if chapter.structure_type != "section" or chapter.printed_start_page is None:
+                continue
+            calculated_pdf = chapter.printed_start_page + section_offset
+            if 1 <= calculated_pdf <= max_page:
+                if chapter.pdf_start_page != calculated_pdf:
+                    chapter.metadata["original_pdf_start_page"] = chapter.pdf_start_page
+                    chapter.metadata["pdf_start_page_repaired_by_section_offset"] = True
+                chapter.pdf_start_page = calculated_pdf
+                chapter.metadata["pdf_start_page_source"] = "section_printed_page_offset"
+                chapter.metadata["printed_to_pdf_offset"] = section_offset
+
     # Best anchor: chapter 1 starts at printed page 1.
-    offset = _infer_pdf_to_printed_offset(chapters)
+    offset = section_offset if section_offset is not None else _infer_pdf_to_printed_offset(chapters)
 
     # Step 3: if offset is known, map missing pdf pages from printed pages and repair printed pages.
     if offset is not None:
@@ -325,7 +416,7 @@ def enrich_chapter_page_ranges(chapters: list[BookChapter], pages: list[Extracte
             # This fixes cases like:
             # printed page 84 + offset 7 = PDF page 91 -> Exponents
             candidate_matches_title = _page_head_matches_title(
-                chapter.chapter_title or "",
+                chapter.display_title or "",
                 candidate_text,
             )
 
@@ -397,7 +488,7 @@ def _page_head_matches_title(title: str, text: str) -> bool:
 
 def _has_title(chapters: list[BookChapter], title: str) -> bool:
     wanted = _normalize_for_match(title)
-    return any(_normalize_for_match(c.chapter_title or "") == wanted for c in chapters)
+    return any(_normalize_for_match(c.display_title or "") == wanted for c in chapters)
 
 
 def _chapter_number_int(chapter: BookChapter) -> int | None:
@@ -420,7 +511,7 @@ def _next_chapter_number(chapters: list[BookChapter]) -> int:
 
 
 def _order_chapters_for_detection(chapters: list[BookChapter]) -> list[BookChapter]:
-    indexed = [(idx, c) for idx, c in enumerate(chapters) if c.chapter_title]
+    indexed = [(idx, c) for idx, c in enumerate(chapters) if c.display_title]
 
     def key(item: tuple[int, BookChapter]) -> tuple[int, int, int]:
         idx, chapter = item
@@ -432,6 +523,74 @@ def _order_chapters_for_detection(chapters: list[BookChapter]) -> list[BookChapt
     return [c for _, c in sorted(indexed, key=key)]
 
 
+def _infer_section_printed_to_pdf_offset(
+    chapters: list[BookChapter],
+    page_text_by_number: dict[int, str],
+    max_page: int,
+) -> int | None:
+    """Infer ``pdf_page = printed_page + offset`` for Unit/Section books.
+
+    Section titles in English literature books often appear again later in
+    transcript pages. The generic monotonic title scan can accidentally choose
+    those later occurrences. This function looks for section titles very near
+    the top of pages, records all plausible offsets, and chooses the dominant
+    offset. For Poorvi, it produces 16 because printed page 1 is PDF page 17.
+    """
+    section_records = [
+        c for c in chapters
+        if c.structure_type == "section" and c.printed_start_page is not None and c.display_title
+    ]
+    if len(section_records) < 3:
+        return None
+
+    offsets: list[int] = []
+    for chapter in sorted(section_records, key=lambda c: c.printed_start_page or 10**9):
+        title = chapter.display_title or ""
+        printed = chapter.printed_start_page
+        if printed is None:
+            continue
+
+        first_matching_page: int | None = None
+        for page_number in sorted(page_text_by_number):
+            text = page_text_by_number.get(page_number, "") or ""
+            if not text.strip() or _is_probable_contents_page(text):
+                continue
+            # Ignore pages before the printed page could possibly occur.
+            # This keeps the search cheap and prevents front-matter noise.
+            if page_number < printed:
+                continue
+            if _page_head_matches_title(title, text):
+                first_matching_page = page_number
+                break
+
+        if first_matching_page is None:
+            continue
+
+        offset = first_matching_page - printed
+        # School textbook front matter is normally far below 100 PDF pages.
+        # Keep the bound loose enough for large prelim sections but tight enough
+        # to reject transcript matches far later in the book.
+        if 0 <= offset <= min(120, max_page):
+            offsets.append(offset)
+
+    if len(offsets) < 3:
+        return None
+
+    counts: dict[int, int] = {}
+    for offset in offsets:
+        counts[offset] = counts.get(offset, 0) + 1
+
+    best_offset, best_count = max(counts.items(), key=lambda item: (item[1], -item[0]))
+    # Require enough support so one accidental heading does not override a whole
+    # book. For 16-section Poorvi, offset 16 gets broad support.
+    if best_count >= max(3, int(len(offsets) * 0.40)):
+        for c in chapters:
+            c.metadata.setdefault("printed_to_pdf_offset_source", "section_heading_offset_mode")
+        return best_offset
+
+    return None
+
+
 def _infer_pdf_to_printed_offset(chapters: list[BookChapter]) -> int | None:
     """Return offset such that pdf_page = printed_page + offset."""
     mapped = [c for c in chapters if c.pdf_start_page is not None]
@@ -439,13 +598,24 @@ def _infer_pdf_to_printed_offset(chapters: list[BookChapter]) -> int | None:
         return None
 
     # Most reliable for school textbooks: chapter 1 body starts at printed page 1.
-    chapter_one_candidates = [c for c in mapped if _chapter_number_int(c) == 1]
+    chapter_one_candidates = [c for c in mapped if _chapter_number_int(c) == 1 and c.chapter_title]
     if chapter_one_candidates:
         first = min(chapter_one_candidates, key=lambda c: c.pdf_start_page or 10**9)
         offset = (first.pdf_start_page or 0) - 1
         if offset >= 0:
             for c in chapters:
                 c.metadata.setdefault("printed_to_pdf_offset_source", "chapter_1_anchor")
+            return offset
+
+    # Section-based books such as NCERT Poorvi do not have chapters. Their first
+    # lesson/section normally starts on printed page 1. Use that as the anchor.
+    first_printed_page_candidates = [c for c in mapped if c.printed_start_page == 1]
+    if first_printed_page_candidates:
+        first = min(first_printed_page_candidates, key=lambda c: c.pdf_start_page or 10**9)
+        offset = (first.pdf_start_page or 0) - 1
+        if offset >= 0:
+            for c in chapters:
+                c.metadata.setdefault("printed_to_pdf_offset_source", "printed_page_1_structure_anchor")
             return offset
 
     # Fallback: use the most common existing offset, but only if it has enough support.
@@ -633,4 +803,10 @@ class ChapterResolver:
         return StructureState(
             chapter_number=chapter.chapter_number,
             chapter_title=chapter.chapter_title,
+            unit_number=chapter.unit_number,
+            unit_title=chapter.unit_title,
+            lesson_title=chapter.lesson_title,
+            section_number=chapter.section_number,
+            section_title=chapter.section_title,
+            topic=chapter.section_title or chapter.lesson_title or chapter.chapter_title,
         )

@@ -98,7 +98,13 @@ CREATE TABLE IF NOT EXISTS embeddings_book_chapters (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     document_id uuid REFERENCES embeddings_documents(id) ON DELETE CASCADE,
     chapter_number text,
-    chapter_title text NOT NULL,
+    chapter_title text,
+    unit_number text,
+    unit_title text,
+    section_number text,
+    section_title text,
+    lesson_title text,
+    structure_type text DEFAULT 'chapter',
     printed_start_page int,
     printed_end_page int,
     pdf_start_page int,
@@ -110,6 +116,14 @@ CREATE TABLE IF NOT EXISTS embeddings_book_chapters (
     updated_at timestamptz DEFAULT now(),
     UNIQUE(document_id, chapter_number, chapter_title)
 );
+
+ALTER TABLE embeddings_book_chapters ALTER COLUMN chapter_title DROP NOT NULL;
+ALTER TABLE embeddings_book_chapters ADD COLUMN IF NOT EXISTS unit_number text;
+ALTER TABLE embeddings_book_chapters ADD COLUMN IF NOT EXISTS unit_title text;
+ALTER TABLE embeddings_book_chapters ADD COLUMN IF NOT EXISTS section_number text;
+ALTER TABLE embeddings_book_chapters ADD COLUMN IF NOT EXISTS section_title text;
+ALTER TABLE embeddings_book_chapters ADD COLUMN IF NOT EXISTS lesson_title text;
+ALTER TABLE embeddings_book_chapters ADD COLUMN IF NOT EXISTS structure_type text DEFAULT 'chapter';
 
 DROP TRIGGER IF EXISTS embeddings_book_chapters_touch_updated_at ON embeddings_book_chapters;
 CREATE TRIGGER embeddings_book_chapters_touch_updated_at
@@ -135,8 +149,10 @@ CREATE TABLE IF NOT EXISTS embeddings_chunks (
 
     chapter_number text,
     chapter_title text,
+    unit_number text,
     unit_title text,
     lesson_title text,
+    section_number text,
     section_title text,
     subsection_title text,
     topic text,
@@ -185,6 +201,11 @@ CREATE TABLE IF NOT EXISTS embeddings_chunks (
 ALTER TABLE embeddings_chunks ADD COLUMN IF NOT EXISTS school_name text;
 ALTER TABLE embeddings_chunks ADD COLUMN IF NOT EXISTS class_name text;
 ALTER TABLE embeddings_chunks ADD COLUMN IF NOT EXISTS book_title text;
+ALTER TABLE embeddings_chunks ADD COLUMN IF NOT EXISTS unit_number text;
+ALTER TABLE embeddings_chunks ADD COLUMN IF NOT EXISTS unit_title text;
+ALTER TABLE embeddings_chunks ADD COLUMN IF NOT EXISTS section_number text;
+ALTER TABLE embeddings_chunks ADD COLUMN IF NOT EXISTS section_title text;
+ALTER TABLE embeddings_chunks ADD COLUMN IF NOT EXISTS lesson_title text;
 
 CREATE TABLE IF NOT EXISTS embeddings_raw_text_pages (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -196,6 +217,14 @@ CREATE TABLE IF NOT EXISTS embeddings_raw_text_pages (
     book_title text,
     chapter_number text,
     chapter_title text,
+    unit_number text,
+    unit_title text,
+    lesson_title text,
+    section_number text,
+    section_title text,
+    subsection_title text,
+    topic text,
+    subtopic text,
     page_number int NOT NULL,
     printed_page_number int,
     raw_text text,
@@ -210,6 +239,14 @@ CREATE TABLE IF NOT EXISTS embeddings_raw_text_pages (
 );
 
 ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS printed_page_number int;
+ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS unit_number text;
+ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS unit_title text;
+ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS lesson_title text;
+ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS section_number text;
+ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS section_title text;
+ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS subsection_title text;
+ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS topic text;
+ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS subtopic text;
 
 DROP TRIGGER IF EXISTS embeddings_raw_text_pages_touch_updated_at ON embeddings_raw_text_pages;
 CREATE TRIGGER embeddings_raw_text_pages_touch_updated_at
@@ -224,8 +261,10 @@ BEGIN
         setweight(to_tsvector('simple', coalesce(NEW.class_name, '')), 'A') ||
         setweight(to_tsvector('simple', coalesce(NEW.book_title, '')), 'A') ||
         setweight(to_tsvector('simple', coalesce(NEW.chapter_title, '')), 'A') ||
+        setweight(to_tsvector('simple', coalesce(NEW.unit_title, '')), 'A') ||
+        setweight(to_tsvector('simple', coalesce(NEW.lesson_title, '')), 'A') ||
+        setweight(to_tsvector('simple', coalesce(NEW.section_title, '')), 'A') ||
         setweight(to_tsvector('simple', coalesce(NEW.topic, '')), 'B') ||
-        setweight(to_tsvector('simple', coalesce(NEW.section_title, '')), 'B') ||
         setweight(to_tsvector('simple', coalesce(NEW.content_clean, '')), 'C');
     RETURN NEW;
 END;
@@ -238,7 +277,7 @@ FOR EACH ROW EXECUTE FUNCTION embeddings_touch_updated_at();
 
 DROP TRIGGER IF EXISTS embeddings_chunks_search_vector_trigger ON embeddings_chunks;
 CREATE TRIGGER embeddings_chunks_search_vector_trigger
-BEFORE INSERT OR UPDATE OF school_name, class_name, book_title, chapter_title, topic, section_title, content_clean
+BEFORE INSERT OR UPDATE OF school_name, class_name, book_title, chapter_title, unit_title, lesson_title, section_title, topic, content_clean
 ON embeddings_chunks
 FOR EACH ROW EXECUTE FUNCTION embeddings_chunks_search_vector_update();
 
@@ -313,3 +352,8 @@ BEGIN
     END;
 END;
 $$;
+
+CREATE INDEX IF NOT EXISTS idx_embeddings_chunks_unit_title ON embeddings_chunks(document_id, unit_title);
+CREATE INDEX IF NOT EXISTS idx_embeddings_chunks_section_title ON embeddings_chunks(document_id, section_title);
+CREATE INDEX IF NOT EXISTS idx_embeddings_raw_text_pages_section_title ON embeddings_raw_text_pages(document_id, section_title);
+CREATE INDEX IF NOT EXISTS idx_embeddings_book_chapters_structure ON embeddings_book_chapters(document_id, structure_type, unit_number, section_number);

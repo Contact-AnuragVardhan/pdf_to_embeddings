@@ -33,7 +33,7 @@ class MetadataBuilder:
         self.language_detector = language_detector
 
     def build_source_label(self, book_title: str, structure: StructureState, page_start: int, page_end: int) -> str:
-        section = structure.chapter_title or structure.section_title or structure.topic
+        section = structure.chapter_title or structure.section_title or structure.lesson_title or structure.unit_title or structure.topic
         pages = f"page {page_start}" if page_start == page_end else f"pages {page_start}-{page_end}"
         if section:
             return f"{book_title}, {section}, {pages}"
@@ -69,6 +69,8 @@ class MetadataBuilder:
                 f"Board: {board or ''}",
                 f"Language: {language or ''}",
                 f"Chapter: {structure.chapter_title or ''}",
+                f"Unit: {structure.unit_title or ''}",
+                f"Lesson: {structure.lesson_title or ''}",
                 f"Section: {structure.section_title or ''}",
                 f"Topic: {structure.topic or ''}",
                 f"Chunk Type: {chunk_type}",
@@ -151,6 +153,12 @@ class MetadataBuilder:
                 "class_name": metadata.get("class_name"),
                 "book_title": book_title,
                 "source_pages": list(range(base["page_start"], base["page_end"] + 1)),
+                "chapter_number": structure.chapter_number,
+                "chapter_title": structure.chapter_title,
+                "unit_number": structure.unit_number,
+                "unit_title": structure.unit_title,
+                "section_number": structure.section_number,
+                "section_title": structure.section_title,
             },
         }
         return chunk
