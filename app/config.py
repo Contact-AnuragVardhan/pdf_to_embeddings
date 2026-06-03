@@ -39,6 +39,12 @@ class Settings:
     log_level: str
     project_root: Path
 
+    # Optional JSON/debug output generated in addition to DB persistence.
+    export_json_enabled: bool
+    json_output_dir: str
+    log_extracted_page_text: bool
+    log_page_text_max_chars: int
+
     # PDF/OCR preprocessing. OCRmyPDF is used before text extraction when the
     # PDF is scanned or has a corrupted text layer.
     pdf_preprocess_with_ocrmypdf: bool
@@ -76,6 +82,10 @@ class Settings:
             reindex_existing=_as_bool(os.getenv("REINDEX_EXISTING"), False),
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
             project_root=Path(__file__).resolve().parent,
+            export_json_enabled=_as_bool(os.getenv("EXPORT_JSON_ENABLED"), True),
+            json_output_dir=os.getenv("JSON_OUTPUT_DIR", "output/json_exports"),
+            log_extracted_page_text=_as_bool(os.getenv("LOG_EXTRACTED_PAGE_TEXT"), False),
+            log_page_text_max_chars=_as_int(os.getenv("LOG_PAGE_TEXT_MAX_CHARS"), 12000),
             pdf_preprocess_with_ocrmypdf=_as_bool(os.getenv("PDF_PREPROCESS_WITH_OCRMYPDF"), True),
             pdf_preprocess_mode=os.getenv("PDF_PREPROCESS_MODE", "auto").strip().lower(),
             pdf_ocrmypdf_strategy=os.getenv("PDF_OCRMYPDF_STRATEGY", "force_ocr").strip().lower(),

@@ -42,6 +42,43 @@ def add_metadata_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--source-uri")
 
 
+def add_extraction_output_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--output-json-dir",
+        help="Folder where <pdf_name>_combined_extraction.json will be written. Defaults to JSON_OUTPUT_DIR.",
+    )
+    parser.add_argument(
+        "--no-json-output",
+        action="store_true",
+        help="Disable combined JSON export for this run.",
+    )
+    parser.add_argument(
+        "--log-page-text",
+        action="store_true",
+        help="Print extracted page text and page metadata to the console logs.",
+    )
+    parser.add_argument(
+        "--no-log-page-text",
+        action="store_true",
+        help="Do not print extracted page text even if LOG_EXTRACTED_PAGE_TEXT=true.",
+    )
+
+
+def extraction_output_options(args: argparse.Namespace) -> dict[str, Any]:
+    if getattr(args, "log_page_text", False) and getattr(args, "no_log_page_text", False):
+        raise ValueError("Use either --log-page-text or --no-log-page-text, not both.")
+    log_page_text = None
+    if getattr(args, "log_page_text", False):
+        log_page_text = True
+    elif getattr(args, "no_log_page_text", False):
+        log_page_text = False
+    return {
+        "export_json": False if getattr(args, "no_json_output", False) else None,
+        "output_json_dir": Path(args.output_json_dir) if getattr(args, "output_json_dir", None) else None,
+        "log_page_text": log_page_text,
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pdf_embedding_pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -60,6 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     ingest.add_argument("--reindex", action="store_true", help="Delete existing document by file_hash and ingest again.")
     ingest.add_argument("--dry-run", action="store_true", help="Extract/chunk only. Do not write DB or call OpenAI.")
     ingest.add_argument("--validate-only", action="store_true", help="Validate CLI/file inputs only.")
+    add_extraction_output_args(ingest)
     ingest.set_defaults(handler=handle_ingest)
 
     folder = sub.add_parser("ingest-folder", help="Ingest all PDFs in a folder.")
@@ -68,6 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
     folder.add_argument("--reindex", action="store_true")
     folder.add_argument("--dry-run", action="store_true")
     folder.add_argument("--validate-only", action="store_true")
+    add_extraction_output_args(folder)
     folder.set_defaults(handler=handle_ingest_folder)
 
     search = sub.add_parser("search", help="Hybrid RAG search over ingested chunks.")
@@ -166,6 +205,7 @@ def handle_ingest(args: argparse.Namespace, settings: Settings) -> None:
         metadata=metadata,
         reindex=args.reindex,
         dry_run=args.dry_run,
+        **extraction_output_options(args),
     )
     console.print_json(
         json=json.dumps(result, default=str, ensure_ascii=False, indent=2)
@@ -190,7 +230,15 @@ def handle_ingest_folder(args: argparse.Namespace, settings: Settings) -> None:
         if args.validate_only:
             results.append({"file": str(pdf_path), "status": "validated"})
             continue
-        results.append(service.ingest_pdf(pdf_path, metadata, reindex=args.reindex, dry_run=args.dry_run))
+        results.append(
+            service.ingest_pdf(
+                pdf_path,
+                metadata,
+                reindex=args.reindex,
+                dry_run=args.dry_run,
+                **extraction_output_options(args),
+            )
+        )
     console.print_json(
         json=json.dumps(results, default=str, ensure_ascii=False, indent=2)
     )

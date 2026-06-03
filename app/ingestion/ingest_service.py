@@ -11,6 +11,7 @@ from ingestion.chunking_strategy import ChunkingPlan, ChunkingStrategySelector
 from ingestion.embedding_service import OpenAIEmbeddingService
 from ingestion.language_detector import LanguageDetector
 from ingestion.llm_metadata_detector import LLMMetadataDetector
+from ingestion.json_exporter import ExtractionJsonExporter
 from ingestion.metadata_builder import MetadataBuilder
 from ingestion.pdf_extractor import PDFTextExtractor
 from ingestion.pdf_preprocessor import PdfPreprocessor
@@ -19,6 +20,7 @@ from ingestion.structure_detector import StructureDetector
 from ingestion.text_cleaner import TextCleaner
 from utils.hashing import sha256_file
 from utils.token_counter import TokenCounter
+from ingestion.book_structure import BookStructure, ChapterResolver
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +42,19 @@ class IngestService:
             default_overlap_tokens=settings.chunk_overlap_tokens,
             auto_enabled=settings.auto_chunking_enabled,
         )
+        self.json_exporter = ExtractionJsonExporter()
 
-    def ingest_pdf(self, pdf_path: Path, metadata: dict[str, Any], *, reindex: bool = False, dry_run: bool = False) -> dict[str, Any]:
+    def ingest_pdf(
+        self,
+        pdf_path: Path,
+        metadata: dict[str, Any],
+        *,
+        reindex: bool = False,
+        dry_run: bool = False,
+        export_json: bool | None = None,
+        output_json_dir: Path | None = None,
+        log_page_text: bool | None = None,
+    ) -> dict[str, Any]:
         original_pdf_path = pdf_path.resolve()
         file_hash = sha256_file(original_pdf_path)
         reindex = reindex or self.settings.reindex_existing
@@ -59,6 +72,7 @@ class IngestService:
         warnings: list[str] = []
         pages_count = chunks_count = embeddings_count = 0
         document_id: str | None = None
+        json_output_path: Path | None = None
         try:
             if not dry_run:
                 run_id = self.repository.create_ingestion_run(file_path=str(original_pdf_path), file_hash=file_hash, metadata=metadata)
@@ -80,6 +94,7 @@ class IngestService:
             warnings.extend(preprocess_result.warnings)
             warnings.extend(extraction_warnings)
             pages_count = len(pages)
+            logger.info("Extracted %s pages from %s", pages_count, extraction_pdf_path)
 
             book_structure = self.metadata_detector.detect(pages, metadata)
             metadata = self._merge_detected_metadata(metadata, book_structure)
@@ -87,6 +102,28 @@ class IngestService:
             chunker = self._build_chunker(chunking_plan)
             chunks = chunker.chunk_pages(pages, metadata, book_structure=book_structure)
             chunks_count = len(chunks)
+            logger.info(
+                "Book structure detected_by=%s structures=%s chunks=%s profile=%s",
+                book_structure.detected_by,
+                len(book_structure.chapters),
+                chunks_count,
+                chunking_plan.content_profile,
+            )
+            self._log_page_extractions(pages, book_structure, enabled=log_page_text)
+            if self._should_export_json(export_json):
+                json_output_path = self.json_exporter.write_combined_extraction(
+                    output_dir=output_json_dir or Path(self.settings.json_output_dir),
+                    original_pdf_path=original_pdf_path,
+                    extraction_pdf_path=extraction_pdf_path,
+                    metadata=metadata,
+                    pages=pages,
+                    chunks=chunks,
+                    book_structure=book_structure,
+                    chunking_plan=chunking_plan,
+                    file_hash=file_hash,
+                    warnings=warnings,
+                    dry_run=dry_run,
+                )
 
             detected_language = self._dominant_language([p.detected_language for p in pages])
             if book_structure.primary_language and detected_language == "Unknown":
@@ -110,6 +147,7 @@ class IngestService:
                     "book_structure": book_structure.to_dict(),
                     "chunking_plan": chunking_plan.to_dict(),
                     "warnings": warnings,
+                    "json_output": str(json_output_path) if json_output_path else None,
                     "sample_chunks": [
                         {
                             "chunk_index": c["chunk_index"],
@@ -183,6 +221,7 @@ class IngestService:
                 },
                 "chunking_plan": chunking_plan.to_dict(),
                 "warnings": warnings,
+                "json_output": str(json_output_path) if json_output_path else None,
                 "summary": self.repository.get_document_summary(document_id=document_id),
             }
         except Exception as exc:
@@ -199,6 +238,55 @@ class IngestService:
                     warnings=warnings,
                 )
             raise
+
+    def _should_export_json(self, override: bool | None) -> bool:
+        return self.settings.export_json_enabled if override is None else override
+
+    def _should_log_page_text(self, override: bool | None) -> bool:
+        return self.settings.log_extracted_page_text if override is None else override
+
+    def _log_page_extractions(
+        self,
+        pages: list[Any],
+        book_structure: BookStructure,
+        *,
+        enabled: bool | None = None,
+    ) -> None:
+        if not self._should_log_page_text(enabled):
+            return
+        resolver = ChapterResolver(book_structure.chapters) if book_structure.chapters else None
+        max_chars = max(0, self.settings.log_page_text_max_chars)
+        for page in pages:
+            resolved = resolver.chapter_for_pdf_page(page.page_number) if resolver else None
+            printed_page = resolver.printed_page_for_pdf_page(page.page_number) if resolver else None
+            structure_label = ""
+            if resolved:
+                structure_label = (
+                    resolved.chapter_title
+                    or resolved.section_title
+                    or resolved.lesson_title
+                    or resolved.unit_title
+                    or ""
+                )
+            text = page.cleaned_text or ""
+            display_text = text if max_chars == 0 or len(text) <= max_chars else text[:max_chars] + "\n...[truncated for console log]"
+            logger.info(
+                "\n========== EXTRACTED PAGE %s%s =========="
+                "\nstructure_type=%s | structure=%s | lang=%s | words=%s | tokens=%s | quality=%s | method=%s"
+                "\n---------- TEXT ----------\n%s"
+                "\n======== END PAGE %s ========",
+                page.page_number,
+                f" / printed {printed_page}" if printed_page is not None else "",
+                resolved.structure_type if resolved else None,
+                structure_label or None,
+                page.detected_language,
+                page.word_count,
+                page.token_count,
+                page.extraction_quality,
+                page.extraction_method,
+                display_text,
+                page.page_number,
+            )
 
     def _build_chunker(self, plan: ChunkingPlan) -> MeaningfulChunker:
         logger.info("Using chunking plan: %s", plan)

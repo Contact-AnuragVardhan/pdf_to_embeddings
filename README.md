@@ -106,6 +106,52 @@ Then recreate:
 python app/main.py init-db
 ```
 
+
+## JSON output and page-wise console logs
+
+The ingestion flow now writes a JSON artifact in addition to saving rows in PostgreSQL.
+The file is written after page extraction, book-structure detection, and chunking, so it is available for both normal ingestion and `--dry-run`.
+
+Default output location:
+
+```text
+output/json_exports/<pdf_name>_combined_extraction.json
+```
+
+Run with page-wise text printed in the console:
+
+```powershell
+python app/main.py ingest-folder --input-dir "input" --board "CBSE" --language "English" --log-page-text
+```
+
+Use a custom JSON output folder:
+
+```powershell
+python app/main.py ingest-folder --input-dir "input" --board "CBSE" --language "English" --output-json-dir "output/extractions"
+```
+
+Disable JSON output for a run:
+
+```powershell
+python app/main.py ingest-folder --input-dir "input" --board "CBSE" --language "English" --no-json-output
+```
+
+Environment settings:
+
+```env
+EXPORT_JSON_ENABLED=true
+JSON_OUTPUT_DIR=output/json_exports
+LOG_EXTRACTED_PAGE_TEXT=false
+LOG_PAGE_TEXT_MAX_CHARS=12000
+```
+
+JSON shape:
+
+- Chapter-based books write `extraction.chapters`.
+- Unit/section-based books write `extraction.sections`.
+- Every JSON includes `extraction.page_extractions` so you can verify text page by page.
+- The normal DB save and embedding flow is unchanged.
+
 ## Ingest all PDFs
 
 Use this folder format:
