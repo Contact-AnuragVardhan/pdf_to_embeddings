@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 def add_metadata_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--title", help="Book title. For folder ingestion this is derived from <Subject>_<Book Title>.pdf.")
     parser.add_argument("--book-title", help="Book title/name. Defaults to title parsed from <Subject>_<Book Title>.pdf.")
+    parser.add_argument("--document-key", help="Stable logical document key for JSON reindexing, e.g. mother-miracle-class-7-maths-rsaggarwal.")
     parser.add_argument("--subject", help="Subject, e.g. Hindi, English, Maths, Science, EVS. Defaults to filename prefix before underscore.")
     parser.add_argument("--school-name", help="School name. Defaults to input/<School Name>/<Class-Grade>/<PDF>.")
     parser.add_argument("--class-name", help="Class/grade folder name, e.g. Class-7. Defaults to input/<School>/<Class-Grade>/<PDF>.")
@@ -100,6 +101,15 @@ def build_parser() -> argparse.ArgumentParser:
     add_extraction_output_args(ingest)
     ingest.set_defaults(handler=handle_ingest)
 
+    ingest_json = sub.add_parser("ingest-json", help="Ingest pre-extracted JSON, save all DB tables, then generate embeddings.")
+    ingest_json.add_argument("--json", required=True, help="Path to JSON with page/chapter/section text. Embeddings must not be included.")
+    add_metadata_args(ingest_json)
+    ingest_json.add_argument("--reindex", action="store_true", help="Delete existing JSON document by document_key and ingest again.")
+    ingest_json.add_argument("--dry-run", action="store_true", help="Parse/chunk only. Do not write DB or call OpenAI.")
+    ingest_json.add_argument("--validate-only", action="store_true", help="Validate JSON file input only.")
+    add_extraction_output_args(ingest_json)
+    ingest_json.set_defaults(handler=handle_ingest_json)
+
     folder = sub.add_parser("ingest-folder", help="Ingest all PDFs in a folder.")
     folder.add_argument("--input-dir", required=True, help="Folder containing PDF files.")
     add_metadata_args(folder)
@@ -137,6 +147,7 @@ def metadata_from_args(
     cli_metadata = {
         "title": args.title or args.book_title,
         "book_title": args.book_title or args.title,
+        "document_key": getattr(args, "document_key", None),
         "subject": args.subject,
         "school_name": args.school_name,
         "class_name": args.class_name,
@@ -202,6 +213,53 @@ def handle_ingest(args: argparse.Namespace, settings: Settings) -> None:
     service = IngestService(settings, repository)
     result = service.ingest_pdf(
         pdf_path=pdf_path,
+        metadata=metadata,
+        reindex=args.reindex,
+        dry_run=args.dry_run,
+        **extraction_output_options(args),
+    )
+    console.print_json(
+        json=json.dumps(result, default=str, ensure_ascii=False, indent=2)
+    )
+
+
+def handle_ingest_json(args: argparse.Namespace, settings: Settings) -> None:
+    json_path = Path(args.json)
+    if not json_path.exists() or not json_path.is_file():
+        raise ValueError(f"JSON file does not exist: {json_path}")
+    metadata = metadata_from_args(args, title_fallback=json_path.stem)
+    if args.validate_only:
+        # Also parse the JSON shape so invalid input fails before a long ingestion run.
+        repository = RagRepository(settings.database_url)
+        service = IngestService(settings, repository)
+        loaded = service.json_input_loader.load(json_path, metadata)
+        console.print_json(
+            json=json.dumps(
+                {
+                    "status": "validation_passed",
+                    "file": str(json_path),
+                    "document_key": loaded.metadata.get("document_key"),
+                    "school_name": loaded.metadata.get("school_name"),
+                    "class_name": loaded.metadata.get("class_name"),
+                    "grade": loaded.metadata.get("grade"),
+                    "subject": loaded.metadata.get("subject"),
+                    "board": loaded.metadata.get("board"),
+                    "language": loaded.metadata.get("language"),
+                    "pages_detected": len(loaded.pages),
+                    "structures_detected": len(loaded.book_structure.chapters),
+                    "warnings": loaded.warnings,
+                },
+                default=str,
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
+
+    repository = RagRepository(settings.database_url)
+    service = IngestService(settings, repository)
+    result = service.ingest_json(
+        json_path=json_path,
         metadata=metadata,
         reindex=args.reindex,
         dry_run=args.dry_run,

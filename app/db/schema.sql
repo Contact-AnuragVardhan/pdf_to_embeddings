@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS embeddings_documents (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     title text NOT NULL,
     book_title text,
+    document_key text,
     normalized_title text,
     school_name text,
     class_name text,
@@ -55,6 +56,7 @@ CREATE TABLE IF NOT EXISTS embeddings_documents (
 );
 
 ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS book_title text;
+ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS document_key text;
 ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS school_name text;
 ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS class_name text;
 ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS primary_language text;
@@ -124,6 +126,25 @@ ALTER TABLE embeddings_book_chapters ADD COLUMN IF NOT EXISTS section_number tex
 ALTER TABLE embeddings_book_chapters ADD COLUMN IF NOT EXISTS section_title text;
 ALTER TABLE embeddings_book_chapters ADD COLUMN IF NOT EXISTS lesson_title text;
 ALTER TABLE embeddings_book_chapters ADD COLUMN IF NOT EXISTS structure_type text DEFAULT 'chapter';
+
+-- Older versions used a chapter-only uniqueness constraint. That blocked multiple
+-- section rows under the same chapter. JSON ingestion can be section-level, so
+-- uniqueness must include unit/section/lesson/page identity too.
+ALTER TABLE embeddings_book_chapters
+    DROP CONSTRAINT IF EXISTS embeddings_book_chapters_document_id_chapter_number_chapter_title_key;
+CREATE UNIQUE INDEX IF NOT EXISTS embeddings_book_chapters_unique_structure_idx
+ON embeddings_book_chapters(
+    document_id,
+    COALESCE(chapter_number, ''),
+    COALESCE(chapter_title, ''),
+    COALESCE(unit_number, ''),
+    COALESCE(unit_title, ''),
+    COALESCE(section_number, ''),
+    COALESCE(section_title, ''),
+    COALESCE(lesson_title, ''),
+    COALESCE(pdf_start_page, -1),
+    COALESCE(pdf_end_page, -1)
+);
 
 DROP TRIGGER IF EXISTS embeddings_book_chapters_touch_updated_at ON embeddings_book_chapters;
 CREATE TRIGGER embeddings_book_chapters_touch_updated_at
@@ -298,6 +319,7 @@ CREATE TABLE IF NOT EXISTS embeddings_ingestion_runs (
     document_id uuid REFERENCES embeddings_documents(id) ON DELETE SET NULL,
     file_path text,
     file_hash text,
+    document_key text,
     status text,
     started_at timestamptz DEFAULT now(),
     finished_at timestamptz,
@@ -309,7 +331,12 @@ CREATE TABLE IF NOT EXISTS embeddings_ingestion_runs (
     metadata jsonb DEFAULT '{}'::jsonb
 );
 
+ALTER TABLE embeddings_ingestion_runs ADD COLUMN IF NOT EXISTS document_key text;
+
 CREATE INDEX IF NOT EXISTS embeddings_documents_file_hash_idx ON embeddings_documents(file_hash);
+CREATE UNIQUE INDEX IF NOT EXISTS embeddings_documents_document_key_uidx ON embeddings_documents(document_key);
+CREATE INDEX IF NOT EXISTS embeddings_documents_document_key_idx ON embeddings_documents(document_key);
+CREATE INDEX IF NOT EXISTS embeddings_ingestion_runs_document_key_idx ON embeddings_ingestion_runs(document_key);
 CREATE INDEX IF NOT EXISTS embeddings_documents_school_class_idx ON embeddings_documents(school_name, class_name);
 CREATE INDEX IF NOT EXISTS embeddings_documents_subject_grade_language_idx ON embeddings_documents(subject, grade, language);
 CREATE INDEX IF NOT EXISTS embeddings_documents_title_idx ON embeddings_documents(title);

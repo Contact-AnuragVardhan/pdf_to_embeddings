@@ -783,12 +783,31 @@ class ChapterResolver:
         self.chapters.sort(key=lambda c: c.pdf_start_page or 10**9)
 
     def chapter_for_pdf_page(self, page_number: int) -> BookChapter | None:
+        candidates: list[BookChapter] = []
         for chapter in self.chapters:
             start = chapter.pdf_start_page or 0
             end = chapter.pdf_end_page or 10**9
             if start <= page_number <= end:
-                return chapter
-        return None
+                candidates.append(chapter)
+        if not candidates:
+            return None
+
+        def specificity(chapter: BookChapter) -> tuple[int, int, int]:
+            # Prefer the most specific overlapping record. This matters for JSON
+            # inputs that may include chapter records plus child section records.
+            fields = [
+                chapter.section_title,
+                chapter.lesson_title,
+                chapter.chapter_title,
+                chapter.unit_title,
+            ]
+            score = sum(1 for value in fields if value)
+            start = chapter.pdf_start_page or 0
+            end = chapter.pdf_end_page or 10**9
+            span = max(1, end - start + 1)
+            return (score, -span, start)
+
+        return max(candidates, key=specificity)
 
     def printed_page_for_pdf_page(self, page_number: int) -> int | None:
         chapter = self.chapter_for_pdf_page(page_number)

@@ -35,15 +35,22 @@ class RagRepository:
 
         init_schema(self.database_url, schema_path)
 
-    def create_ingestion_run(self, *, file_path: str, file_hash: str, metadata: dict[str, Any] | None = None) -> str:
+    def create_ingestion_run(
+        self,
+        *,
+        file_path: str,
+        file_hash: str,
+        document_key: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
         with get_connection(self.database_url) as conn, conn.transaction():
             row = conn.execute(
                 """
-                INSERT INTO embeddings_ingestion_runs(file_path, file_hash, status, metadata)
-                VALUES (%s, %s, 'running', %s::jsonb)
+                INSERT INTO embeddings_ingestion_runs(file_path, file_hash, document_key, status, metadata)
+                VALUES (%s, %s, %s, 'running', %s::jsonb)
                 RETURNING id
                 """,
-                (file_path, file_hash, _json(metadata or {})),
+                (file_path, file_hash, document_key, _json(metadata or {})),
             ).fetchone()
             return str(row[0])
 
@@ -87,9 +94,28 @@ class RagRepository:
         with get_connection(self.database_url) as conn, conn.transaction():
             conn.execute("DELETE FROM embeddings_documents WHERE file_hash=%s", (file_hash,))
 
+    def document_exists_by_document_key(self, document_key: str) -> dict[str, Any] | None:
+        with get_connection(self.database_url) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("SELECT * FROM embeddings_documents WHERE document_key=%s", (document_key,))
+                row = cur.fetchone()
+                return dict(row) if row else None
+
+    def delete_document_by_document_key(self, document_key: str) -> None:
+        with get_connection(self.database_url) as conn, conn.transaction():
+            conn.execute("DELETE FROM embeddings_documents WHERE document_key=%s", (document_key,))
+
     def upsert_document(self, document: dict[str, Any]) -> str:
+        return self._upsert_document(document, conflict_column="file_hash")
+
+    def upsert_document_by_document_key(self, document: dict[str, Any]) -> str:
+        if not document.get("document_key"):
+            raise ValueError("document_key is required for document-key upsert.")
+        return self._upsert_document(document, conflict_column="document_key")
+
+    def _upsert_document(self, document: dict[str, Any], *, conflict_column: str) -> str:
         columns = [
-            "title", "book_title", "normalized_title", "school_name", "class_name", "subject", "grade",
+            "title", "book_title", "document_key", "normalized_title", "school_name", "class_name", "subject", "grade",
             "board", "medium", "language", "detected_language", "primary_language", "languages_detected",
             "publisher", "edition", "publication_year", "isbn", "author", "source_type", "source_uri", "file_name",
             "file_path", "file_hash", "file_size_bytes", "mime_type", "total_pages", "total_words", "total_tokens",
@@ -103,13 +129,13 @@ class RagRepository:
             else:
                 values.append(document.get(col))
         placeholders = ", ".join(["%s::jsonb" if c in {"metadata", "languages_detected"} else "%s" for c in columns])
-        update_clause = ", ".join(f"{c}=EXCLUDED.{c}" for c in columns if c != "file_hash")
+        update_clause = ", ".join(f"{c}=EXCLUDED.{c}" for c in columns if c != conflict_column)
         with get_connection(self.database_url) as conn, conn.transaction():
             row = conn.execute(
                 f"""
                 INSERT INTO embeddings_documents({', '.join(columns)})
                 VALUES ({placeholders})
-                ON CONFLICT(file_hash) DO UPDATE SET {update_clause}
+                ON CONFLICT({conflict_column}) DO UPDATE SET {update_clause}
                 RETURNING id
                 """,
                 values,
@@ -373,15 +399,22 @@ class RagRepository:
             with conn.cursor() as cur:
                 cur.executemany(sql, params)
 
-    def get_document_summary(self, document_id: str | None = None, file_hash: str | None = None) -> dict[str, Any] | None:
-        where = "d.id=%s" if document_id else "d.file_hash=%s"
-        value = document_id or file_hash
+    def get_document_summary(self, document_id: str | None = None, file_hash: str | None = None, document_key: str | None = None) -> dict[str, Any] | None:
+        if document_id:
+            where = "d.id=%s"
+            value = document_id
+        elif document_key:
+            where = "d.document_key=%s"
+            value = document_key
+        else:
+            where = "d.file_hash=%s"
+            value = file_hash
         if not value:
             return None
         sql = f"""
         SELECT d.id, d.title, d.book_title, d.school_name, d.class_name, d.subject, d.grade, d.language,
                d.primary_language, d.content_profile, d.chunking_strategy, d.chunk_max_tokens, d.chunk_overlap_tokens,
-               d.file_name, d.file_hash, d.total_pages, d.total_words, d.total_tokens,
+               d.document_key, d.file_name, d.file_hash, d.total_pages, d.total_words, d.total_tokens,
                COUNT(DISTINCT c.id)::int AS chunks,
                COUNT(DISTINCT v.id)::int AS embeddings
         FROM embeddings_documents d

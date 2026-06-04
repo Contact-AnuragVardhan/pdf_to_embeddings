@@ -152,6 +152,107 @@ JSON shape:
 - Every JSON includes `extraction.page_extractions` so you can verify text page by page.
 - The normal DB save and embedding flow is unchanged.
 
+
+## Ingest pre-extracted JSON instead of reading the PDF again
+
+Use this when another process has already extracted book text chapter-wise or section-wise. The JSON should **not** contain embeddings. This command bypasses OCR/PDF extraction, saves the document, book structures, page text, raw page text, chunks, and then creates embeddings from the extracted text.
+
+JSON ingestion uses `document_key` as the stable logical identity. Reindexing deletes/replaces by `document_key`, not by the JSON file hash.
+
+```powershell
+python app/main.py ingest-json --json "samples/json_ingest_sample.json" --document-key "mother-miracle-class-7-maths-sample-maths-book" --board "CBSE" --language "English"
+```
+
+For a safe check without DB writes or OpenAI calls:
+
+```powershell
+python app/main.py ingest-json --json "samples/json_ingest_sample.json" --dry-run --no-json-output
+```
+
+For reprocessing the same logical document, even if the JSON file contents changed:
+
+```powershell
+python app/main.py ingest-json --json "samples/json_ingest_sample.json" --reindex
+```
+
+The JSON importer accepts either:
+
+- the pipeline's own `*_combined_extraction.json` output, or
+- a smaller JSON with `document_key`, `metadata`, `extraction.chapters` or `extraction.sections`, and optional `extraction.page_extractions`.
+
+Metadata mapping order:
+
+1. Root-level fields such as `document_key`, `school_name`, `class_name`, `grade`, `subject`, `board`, `language`.
+2. `metadata` object.
+3. `extraction` object.
+4. CLI arguments, which override JSON values when provided.
+
+Accepted aliases include `school`, `schoolName`, `class`, `standard`, `subject_name`, `subjectName`, `book_key`, and `documentKey`. If `document_key` is not supplied, the loader derives one from `school_name + class_name/grade + subject + book_title`, but it is better to provide it explicitly.
+
+Minimal chapter/section JSON shape:
+
+```json
+{
+  "document_key": "mother-miracle-class-7-maths-sample-maths-book",
+  "metadata": {
+    "school_name": "Mother Miracle School",
+    "class_name": "Class-7",
+    "grade": "Class-7",
+    "board": "CBSE",
+    "medium": "English",
+    "book_title": "Sample Maths Book",
+    "subject": "Maths",
+    "language": "English"
+  },
+  "extraction": {
+    "book_title": "Sample Maths Book",
+    "subject": "Maths",
+    "language": "English",
+    "chapters": [
+      {
+        "chapter_number": "1",
+        "chapter_title": "Integers",
+        "start_page": 5,
+        "end_page": 8,
+        "printed_start_page": 1,
+        "printed_end_page": 4,
+        "lessons": [
+          {
+            "section_number": "1.1",
+            "section_title": "Introduction to Integers",
+            "start_page": 5,
+            "end_page": 6,
+            "printed_start_page": 1,
+            "printed_end_page": 2,
+            "lesson_text": "Full extracted text for this section..."
+          }
+        ]
+      }
+    ],
+    "page_extractions": [
+      {
+        "page_number": 5,
+        "printed_page_number": 1,
+        "chapter_number": "1",
+        "chapter_title": "Integers",
+        "section_number": "1.1",
+        "section_title": "Introduction to Integers",
+        "text": "Exact extracted text for PDF page 5..."
+      }
+    ]
+  }
+}
+```
+
+Notes:
+
+- `document_key` is stored in `embeddings_documents.document_key` and `embeddings_ingestion_runs.document_key`.
+- The physical JSON file hash is stored as `json_input_hash` in metadata for audit. It is not used as the JSON document identity.
+- `page_extractions` is recommended because it stores exact page-wise text in `embeddings_pages` and `embeddings_raw_text_pages`.
+- If `page_extractions` is missing, the importer synthesizes page records from each chapter/section `start_page`, `end_page`, and `lesson_text`/`text`.
+- For chapter-based books use `extraction.chapters`.
+- For unit/section-based books use `extraction.sections`; each section lesson can include `unit_number`, `unit_title`, `section_number`, `section_title`, `start_page`, `end_page`, and `lesson_text`.
+
 ## Ingest all PDFs
 
 Use this folder format:

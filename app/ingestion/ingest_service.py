@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import asdict
 from pathlib import Path
@@ -12,6 +13,7 @@ from ingestion.embedding_service import OpenAIEmbeddingService
 from ingestion.language_detector import LanguageDetector
 from ingestion.llm_metadata_detector import LLMMetadataDetector
 from ingestion.json_exporter import ExtractionJsonExporter
+from ingestion.json_input_loader import JsonExtractionInputLoader
 from ingestion.metadata_builder import MetadataBuilder
 from ingestion.pdf_extractor import PDFTextExtractor
 from ingestion.pdf_preprocessor import PdfPreprocessor
@@ -23,6 +25,11 @@ from utils.token_counter import TokenCounter
 from ingestion.book_structure import BookStructure, ChapterResolver
 
 logger = logging.getLogger(__name__)
+
+
+def _stable_json_document_hash(document_key: str) -> str:
+    """Return a deterministic hash for JSON documents based on document_key, not file contents."""
+    return hashlib.sha256(f"json_document_key:{document_key}".encode("utf-8")).hexdigest()
 
 
 class IngestService:
@@ -43,6 +50,7 @@ class IngestService:
             auto_enabled=settings.auto_chunking_enabled,
         )
         self.json_exporter = ExtractionJsonExporter()
+        self.json_input_loader = JsonExtractionInputLoader(self.cleaner, self.language_detector, self.token_counter)
 
     def ingest_pdf(
         self,
@@ -239,6 +247,229 @@ class IngestService:
                 )
             raise
 
+    def ingest_json(
+        self,
+        json_path: Path,
+        metadata: dict[str, Any],
+        *,
+        reindex: bool = False,
+        dry_run: bool = False,
+        export_json: bool | None = None,
+        output_json_dir: Path | None = None,
+        log_page_text: bool | None = None,
+    ) -> dict[str, Any]:
+        """Ingest pre-extracted JSON and then run the normal embedding flow.
+
+        This is a parallel entry point to ``ingest_pdf``. It skips PDF/OCR/LLM
+        extraction because the JSON already contains page/chapter/section text,
+        then reuses the same chunker, repositories, and embedding service.
+
+        For JSON ingestion, document identity is ``document_key``. The raw JSON
+        content hash is stored only as metadata/audit data so editing the JSON does
+        not accidentally create a second document when the logical book is the same.
+        """
+        json_path = json_path.resolve()
+        json_input_hash = sha256_file(json_path)
+        reindex = reindex or self.settings.reindex_existing
+
+        run_id: str | None = None
+        warnings: list[str] = []
+        pages_count = chunks_count = embeddings_count = 0
+        document_id: str | None = None
+        json_output_path: Path | None = None
+        document_key: str | None = None
+        file_hash: str | None = None
+
+        try:
+            loaded = self.json_input_loader.load(json_path, metadata)
+            metadata = loaded.metadata
+            book_structure = loaded.book_structure
+            pages = loaded.pages
+            warnings.extend(loaded.warnings)
+            pages_count = len(pages)
+            document_key = str(metadata.get("document_key") or "").strip()
+            if not document_key:
+                raise ValueError("JSON ingestion requires document_key. Add metadata.document_key or document_key at the root.")
+
+            # Keep the legacy file_hash column stable for this logical JSON document.
+            # The actual uploaded JSON hash is stored separately as json_input_hash.
+            file_hash = _stable_json_document_hash(document_key)
+            metadata["document_key"] = document_key
+            metadata["json_input_hash"] = json_input_hash
+            metadata["json_identity_hash"] = file_hash
+            metadata["json_identity_strategy"] = "sha256(json_document_key:<document_key>)"
+            metadata["source_json_path"] = str(json_path)
+            logger.info("Loaded %s JSON text pages from %s with document_key=%s", pages_count, json_path, document_key)
+
+            if not dry_run:
+                existing = self.repository.document_exists_by_document_key(document_key)
+                if existing and not reindex:
+                    summary = self.repository.get_document_summary(document_key=document_key)
+                    return {
+                        "status": "skipped_existing",
+                        "reason": "same document_key already ingested; use --reindex to replace it",
+                        "document_key": document_key,
+                        "json_input_hash": json_input_hash,
+                        "document": summary,
+                    }
+                if existing and reindex:
+                    logger.info("Reindex requested. Deleting existing JSON document for document_key=%s", document_key)
+                    self.repository.delete_document_by_document_key(document_key)
+
+                run_id = self.repository.create_ingestion_run(
+                    file_path=str(json_path),
+                    file_hash=json_input_hash,
+                    document_key=document_key,
+                    metadata=metadata,
+                )
+
+            metadata = self._merge_detected_metadata(metadata, book_structure)
+            metadata["document_key"] = document_key
+            metadata["source_json_path"] = str(json_path)
+            metadata["json_input_hash"] = json_input_hash
+            metadata["json_identity_hash"] = file_hash
+            metadata["json_identity_strategy"] = "sha256(json_document_key:<document_key>)"
+            chunking_plan = self.chunking_selector.select(pages, metadata, book_structure)
+            chunker = self._build_chunker(chunking_plan)
+            chunks = chunker.chunk_pages(pages, metadata, book_structure=book_structure)
+            chunks_count = len(chunks)
+            logger.info(
+                "JSON book structure detected_by=%s structures=%s chunks=%s profile=%s",
+                book_structure.detected_by,
+                len(book_structure.chapters),
+                chunks_count,
+                chunking_plan.content_profile,
+            )
+            self._log_page_extractions(pages, book_structure, enabled=log_page_text)
+            if self._should_export_json(export_json):
+                json_output_path = self.json_exporter.write_combined_extraction(
+                    output_dir=output_json_dir or Path(self.settings.json_output_dir),
+                    original_pdf_path=json_path,
+                    extraction_pdf_path=json_path,
+                    metadata=metadata,
+                    pages=pages,
+                    chunks=chunks,
+                    book_structure=book_structure,
+                    chunking_plan=chunking_plan,
+                    file_hash=file_hash,
+                    warnings=warnings,
+                    dry_run=dry_run,
+                )
+
+            detected_language = self._dominant_language([p.detected_language for p in pages])
+            if book_structure.primary_language and detected_language == "Unknown":
+                detected_language = book_structure.primary_language
+            total_words = sum(p.word_count for p in pages)
+            total_tokens = sum(p.token_count for p in pages)
+
+            if dry_run:
+                return {
+                    "status": "dry_run_ok",
+                    "file": str(json_path),
+                    "source_type": "json_extraction",
+                    "document_key": document_key,
+                    "file_hash": file_hash,
+                    "json_input_hash": json_input_hash,
+                    "pages_loaded": pages_count,
+                    "chunks_created": chunks_count,
+                    "detected_language": detected_language,
+                    "metadata": metadata,
+                    "book_structure": book_structure.to_dict(),
+                    "chunking_plan": chunking_plan.to_dict(),
+                    "warnings": warnings,
+                    "json_output": str(json_output_path) if json_output_path else None,
+                    "sample_chunks": [
+                        {
+                            "chunk_index": c["chunk_index"],
+                            "page_start": c["page_start"],
+                            "page_end": c["page_end"],
+                            "chapter_number": c.get("chapter_number"),
+                            "chapter_title": c.get("chapter_title"),
+                            "unit_title": c.get("unit_title"),
+                            "section_title": c.get("section_title"),
+                            "chunk_type": c["chunk_type"],
+                            "source_label": c["source_label"],
+                            "preview": c["content_clean"][:220],
+                        }
+                        for c in chunks[:8]
+                    ],
+                }
+
+            document = self._build_document_record(
+                pdf_path=json_path,
+                file_hash=file_hash,
+                metadata=metadata,
+                book_structure=book_structure,
+                chunking_plan=chunking_plan,
+                detected_language=detected_language,
+                total_pages=pages_count,
+                total_words=total_words,
+                total_tokens=total_tokens,
+                extraction_status="json_loaded" if chunks else "json_loaded_no_chunks_created",
+                source_type="json_extraction",
+                mime_type="application/json",
+            )
+            document_id = self.repository.upsert_document_by_document_key(document)
+            self.repository.insert_book_chapters(document_id, book_structure.chapters)
+            pages_as_dicts = [asdict(p) for p in pages]
+            self.repository.insert_pages(document_id, pages_as_dicts)
+            chunks_with_ids = self.repository.insert_chunks(document_id, chunks)
+            self.repository.insert_raw_text_pages(document_id, pages_as_dicts, chunks_with_ids, metadata, book_structure=book_structure)
+
+            self.settings.validate_for_embedding()
+            embedding_service = OpenAIEmbeddingService(self.settings, self.token_counter)
+            embeddings = embedding_service.embed_chunks(chunks_with_ids, document_id)
+            self.repository.insert_embeddings(embeddings)
+            embeddings_count = len(embeddings)
+
+            if run_id:
+                self.repository.finish_ingestion_run(
+                    run_id,
+                    status="completed",
+                    document_id=document_id,
+                    pages_extracted=pages_count,
+                    chunks_created=chunks_count,
+                    embeddings_created=embeddings_count,
+                    warnings=warnings,
+                )
+            return {
+                "status": "completed",
+                "document_id": document_id,
+                "document_key": document_key,
+                "file": str(json_path),
+                "source_type": "json_extraction",
+                "file_hash": file_hash,
+                "json_input_hash": json_input_hash,
+                "pages_loaded": pages_count,
+                "chunks_created": chunks_count,
+                "embeddings_created": embeddings_count,
+                "book_structure": {
+                    "detected_by": book_structure.detected_by,
+                    "structures_detected": len(book_structure.chapters),
+                    "chapters_detected": len([c for c in book_structure.chapters if c.chapter_title]),
+                    "sections_detected": len([c for c in book_structure.chapters if c.section_title]),
+                    "content_profile": book_structure.content_profile,
+                },
+                "chunking_plan": chunking_plan.to_dict(),
+                "warnings": warnings,
+                "json_output": str(json_output_path) if json_output_path else None,
+                "summary": self.repository.get_document_summary(document_id=document_id),
+            }
+        except Exception as exc:
+            logger.exception("JSON ingestion failed for %s", json_path)
+            if run_id:
+                self.repository.finish_ingestion_run(
+                    run_id,
+                    status="failed",
+                    document_id=document_id,
+                    pages_extracted=pages_count,
+                    chunks_created=chunks_count,
+                    embeddings_created=embeddings_count,
+                    error_message=str(exc),
+                    warnings=warnings,
+                )
+            raise
+
     def _should_export_json(self, override: bool | None) -> bool:
         return self.settings.export_json_enabled if override is None else override
 
@@ -339,12 +570,15 @@ class IngestService:
         total_words: int,
         total_tokens: int,
         extraction_status: str,
+        source_type: str = "readable_pdf",
+        mime_type: str = "application/pdf",
     ) -> dict[str, Any]:
         title = metadata.get("title") or metadata.get("book_title") or pdf_path.stem
         book_title = metadata.get("book_title") or title
         return {
             "title": title,
             "book_title": book_title,
+            "document_key": metadata.get("document_key"),
             "normalized_title": " ".join(title.lower().split()),
             "school_name": metadata.get("school_name"),
             "class_name": metadata.get("class_name"),
@@ -361,13 +595,13 @@ class IngestService:
             "publication_year": metadata.get("publication_year"),
             "isbn": metadata.get("isbn"),
             "author": metadata.get("author"),
-            "source_type": "readable_pdf",
+            "source_type": source_type,
             "source_uri": metadata.get("source_uri"),
             "file_name": pdf_path.name,
             "file_path": str(pdf_path),
             "file_hash": file_hash,
             "file_size_bytes": pdf_path.stat().st_size,
-            "mime_type": "application/pdf",
+            "mime_type": mime_type,
             "total_pages": total_pages,
             "total_words": total_words,
             "total_tokens": total_tokens,
@@ -383,12 +617,15 @@ class IngestService:
             "chunk_overlap_tokens": chunking_plan.overlap_tokens,
             "metadata": {
                 "pipeline": "pdf_embedding_pipeline",
+                "document_key": metadata.get("document_key"),
                 "school_name": metadata.get("school_name"),
                 "class_name": metadata.get("class_name"),
                 "book_title": book_title,
                 "subject": metadata.get("subject"),
                 "grade": metadata.get("grade"),
                 "path_metadata_source": metadata.get("path_metadata_source"),
+                "json_input_hash": metadata.get("json_input_hash"),
+                "json_identity_hash": metadata.get("json_identity_hash"),
                 "embedding_model": self.settings.openai_embedding_model,
                 "embedding_dimensions": self.settings.openai_embedding_dimensions,
                 "metadata_model": self.settings.openai_metadata_model,
