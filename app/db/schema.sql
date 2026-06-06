@@ -57,8 +57,14 @@ CREATE TABLE IF NOT EXISTS embeddings_documents (
 
 ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS book_title text;
 ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS document_key text;
+ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS normalized_title text;
 ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS school_name text;
 ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS class_name text;
+ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS subject text;
+ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS grade text;
+ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS board text;
+ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS medium text;
+ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS language text;
 ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS primary_language text;
 ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS languages_detected jsonb DEFAULT '[]'::jsonb;
 ALTER TABLE embeddings_documents ADD COLUMN IF NOT EXISTS llm_metadata_model text;
@@ -137,6 +143,8 @@ UPDATE embeddings_book_chapters
 SET section_key = COALESCE(NULLIF(section_key, ''), NULLIF(section_number, ''), NULLIF(chapter_number, ''), NULLIF(lesson_title, ''), NULLIF(section_title, ''), NULLIF(chapter_title, ''))
 WHERE section_key IS NULL OR section_key = '';
 
+ALTER TABLE embeddings_book_chapters
+    DROP CONSTRAINT IF EXISTS embeddings_book_chapters_document_id_chapter_number_chapter_key;
 ALTER TABLE embeddings_book_chapters
     DROP CONSTRAINT IF EXISTS embeddings_book_chapters_document_id_chapter_number_chapter_title_key;
 ALTER TABLE embeddings_book_chapters
@@ -249,14 +257,6 @@ CREATE TABLE IF NOT EXISTS embeddings_chunks (
     page_end int NOT NULL,
     chunk_index int NOT NULL,
 
-    book_title text,
-    school_name text,
-    class_name text,
-    subject text,
-    grade text,
-    board text,
-    medium text,
-    language text,
     detected_language text,
 
     chapter_number text,
@@ -311,9 +311,6 @@ CREATE TABLE IF NOT EXISTS embeddings_chunks (
     UNIQUE(document_id, chunk_index)
 );
 
-ALTER TABLE embeddings_chunks ADD COLUMN IF NOT EXISTS school_name text;
-ALTER TABLE embeddings_chunks ADD COLUMN IF NOT EXISTS class_name text;
-ALTER TABLE embeddings_chunks ADD COLUMN IF NOT EXISTS book_title text;
 ALTER TABLE embeddings_chunks ADD COLUMN IF NOT EXISTS unit_number text;
 ALTER TABLE embeddings_chunks ADD COLUMN IF NOT EXISTS unit_title text;
 ALTER TABLE embeddings_chunks ADD COLUMN IF NOT EXISTS section_number text;
@@ -325,11 +322,6 @@ ALTER TABLE embeddings_chunks ADD COLUMN IF NOT EXISTS subsection_title text;
 CREATE TABLE IF NOT EXISTS embeddings_raw_text_pages (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     document_id uuid REFERENCES embeddings_documents(id) ON DELETE CASCADE,
-    school_name text,
-    class_name text,
-    grade text,
-    subject text,
-    book_title text,
     chapter_number text,
     chapter_title text,
     unit_number text,
@@ -370,13 +362,28 @@ CREATE TRIGGER embeddings_raw_text_pages_touch_updated_at
 BEFORE UPDATE ON embeddings_raw_text_pages
 FOR EACH ROW EXECUTE FUNCTION embeddings_touch_updated_at();
 
+
+-- Refactor: book/document-level metadata lives only in embeddings_documents.
+-- Child tables keep only page/structure-specific metadata and join to documents when needed.
+ALTER TABLE embeddings_chunks DROP COLUMN IF EXISTS book_title;
+ALTER TABLE embeddings_chunks DROP COLUMN IF EXISTS school_name;
+ALTER TABLE embeddings_chunks DROP COLUMN IF EXISTS class_name;
+ALTER TABLE embeddings_chunks DROP COLUMN IF EXISTS subject;
+ALTER TABLE embeddings_chunks DROP COLUMN IF EXISTS grade;
+ALTER TABLE embeddings_chunks DROP COLUMN IF EXISTS board;
+ALTER TABLE embeddings_chunks DROP COLUMN IF EXISTS medium;
+ALTER TABLE embeddings_chunks DROP COLUMN IF EXISTS language;
+
+ALTER TABLE embeddings_raw_text_pages DROP COLUMN IF EXISTS school_name;
+ALTER TABLE embeddings_raw_text_pages DROP COLUMN IF EXISTS class_name;
+ALTER TABLE embeddings_raw_text_pages DROP COLUMN IF EXISTS grade;
+ALTER TABLE embeddings_raw_text_pages DROP COLUMN IF EXISTS subject;
+ALTER TABLE embeddings_raw_text_pages DROP COLUMN IF EXISTS book_title;
+
 CREATE OR REPLACE FUNCTION embeddings_chunks_search_vector_update()
 RETURNS trigger AS $$
 BEGIN
     NEW.search_vector :=
-        setweight(to_tsvector('simple', coalesce(NEW.school_name, '')), 'A') ||
-        setweight(to_tsvector('simple', coalesce(NEW.class_name, '')), 'A') ||
-        setweight(to_tsvector('simple', coalesce(NEW.book_title, '')), 'A') ||
         setweight(to_tsvector('simple', coalesce(NEW.chapter_title, '')), 'A') ||
         setweight(to_tsvector('simple', coalesce(NEW.unit_title, '')), 'A') ||
         setweight(to_tsvector('simple', coalesce(NEW.lesson_title, '')), 'A') ||
@@ -395,7 +402,7 @@ FOR EACH ROW EXECUTE FUNCTION embeddings_touch_updated_at();
 
 DROP TRIGGER IF EXISTS embeddings_chunks_search_vector_trigger ON embeddings_chunks;
 CREATE TRIGGER embeddings_chunks_search_vector_trigger
-BEFORE INSERT OR UPDATE OF school_name, class_name, book_title, chapter_title, unit_title, lesson_title, section_title, subsection_title, topic, content_clean
+BEFORE INSERT OR UPDATE OF chapter_title, unit_title, lesson_title, section_title, subsection_title, topic, content_clean
 ON embeddings_chunks
 FOR EACH ROW EXECUTE FUNCTION embeddings_chunks_search_vector_update();
 
@@ -410,6 +417,27 @@ CREATE TABLE IF NOT EXISTS embeddings_vectors (
     created_at timestamptz DEFAULT now(),
     UNIQUE(chunk_id, embedding_model, embedding_dimensions)
 );
+
+CREATE TABLE IF NOT EXISTS embeddings_subsection_vectors (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    subsection_id uuid REFERENCES embeddings_book_subsections(id) ON DELETE CASCADE,
+    document_id uuid REFERENCES embeddings_documents(id) ON DELETE CASCADE,
+    embedding_model text NOT NULL DEFAULT 'text-embedding-3-large',
+    embedding_dimensions int NOT NULL DEFAULT 3072,
+    embedding vector(3072) NOT NULL,
+    embedding_input_hash text NOT NULL,
+    content_for_embedding text NOT NULL,
+    token_count int,
+    text_was_truncated boolean DEFAULT false,
+    metadata jsonb DEFAULT '{}'::jsonb,
+    created_at timestamptz DEFAULT now(),
+    UNIQUE(subsection_id, embedding_model, embedding_dimensions)
+);
+
+ALTER TABLE embeddings_subsection_vectors ADD COLUMN IF NOT EXISTS content_for_embedding text;
+ALTER TABLE embeddings_subsection_vectors ADD COLUMN IF NOT EXISTS token_count int;
+ALTER TABLE embeddings_subsection_vectors ADD COLUMN IF NOT EXISTS text_was_truncated boolean DEFAULT false;
+ALTER TABLE embeddings_subsection_vectors ADD COLUMN IF NOT EXISTS metadata jsonb DEFAULT '{}'::jsonb;
 
 CREATE TABLE IF NOT EXISTS embeddings_ingestion_runs (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -450,7 +478,6 @@ CREATE INDEX IF NOT EXISTS embeddings_book_chapters_pdf_range_idx ON embeddings_
 CREATE INDEX IF NOT EXISTS embeddings_raw_text_pages_document_page_idx ON embeddings_raw_text_pages(document_id, page_number);
 CREATE INDEX IF NOT EXISTS embeddings_raw_text_pages_printed_page_idx ON embeddings_raw_text_pages(document_id, printed_page_number);
 CREATE INDEX IF NOT EXISTS embeddings_raw_text_pages_chapter_idx ON embeddings_raw_text_pages(chapter_title);
-CREATE INDEX IF NOT EXISTS embeddings_raw_text_pages_school_class_idx ON embeddings_raw_text_pages(school_name, class_name);
 
 CREATE INDEX IF NOT EXISTS embeddings_book_subsections_document_idx ON embeddings_book_subsections(document_id);
 CREATE INDEX IF NOT EXISTS embeddings_book_subsections_chapter_idx ON embeddings_book_subsections(document_id, chapter_number, chapter_title);
@@ -460,8 +487,6 @@ CREATE INDEX IF NOT EXISTS embeddings_book_subsections_pdf_range_idx ON embeddin
 CREATE INDEX IF NOT EXISTS embeddings_book_subsections_metadata_idx ON embeddings_book_subsections USING GIN(metadata);
 
 CREATE INDEX IF NOT EXISTS embeddings_chunks_document_idx ON embeddings_chunks(document_id);
-CREATE INDEX IF NOT EXISTS embeddings_chunks_school_class_idx ON embeddings_chunks(school_name, class_name);
-CREATE INDEX IF NOT EXISTS embeddings_chunks_subject_grade_language_idx ON embeddings_chunks(subject, grade, language);
 CREATE INDEX IF NOT EXISTS embeddings_chunks_chapter_title_idx ON embeddings_chunks(chapter_title);
 CREATE INDEX IF NOT EXISTS embeddings_chunks_topic_idx ON embeddings_chunks(topic);
 CREATE INDEX IF NOT EXISTS embeddings_chunks_chunk_type_idx ON embeddings_chunks(chunk_type);
@@ -469,6 +494,9 @@ CREATE INDEX IF NOT EXISTS embeddings_chunks_search_vector_idx ON embeddings_chu
 CREATE INDEX IF NOT EXISTS embeddings_chunks_metadata_idx ON embeddings_chunks USING GIN(metadata);
 
 CREATE INDEX IF NOT EXISTS embeddings_vectors_document_idx ON embeddings_vectors(document_id);
+CREATE INDEX IF NOT EXISTS embeddings_subsection_vectors_document_idx ON embeddings_subsection_vectors(document_id);
+CREATE INDEX IF NOT EXISTS embeddings_subsection_vectors_subsection_idx ON embeddings_subsection_vectors(subsection_id);
+CREATE INDEX IF NOT EXISTS embeddings_subsection_vectors_metadata_idx ON embeddings_subsection_vectors USING GIN(metadata);
 
 DO $$
 BEGIN
@@ -480,6 +508,17 @@ BEGIN
             EXECUTE 'CREATE INDEX IF NOT EXISTS embeddings_vectors_ivfflat_idx ON embeddings_vectors USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)';
         EXCEPTION WHEN OTHERS THEN
             RAISE NOTICE 'IVFFlat index creation also failed. Vector search still works without ANN index. Error: %', SQLERRM;
+        END;
+    END;
+
+    BEGIN
+        EXECUTE 'CREATE INDEX IF NOT EXISTS embeddings_subsection_vectors_hnsw_idx ON embeddings_subsection_vectors USING hnsw (embedding vector_cosine_ops)';
+    EXCEPTION WHEN OTHERS THEN
+        RAISE NOTICE 'Subsection HNSW index creation failed or is unsupported; falling back to IVFFlat. Error: %', SQLERRM;
+        BEGIN
+            EXECUTE 'CREATE INDEX IF NOT EXISTS embeddings_subsection_vectors_ivfflat_idx ON embeddings_subsection_vectors USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)';
+        EXCEPTION WHEN OTHERS THEN
+            RAISE NOTICE 'Subsection IVFFlat index creation also failed. Vector search still works without ANN index. Error: %', SQLERRM;
         END;
     END;
 END;

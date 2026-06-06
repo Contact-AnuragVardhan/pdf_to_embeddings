@@ -78,7 +78,7 @@ class IngestService:
 
         run_id: str | None = None
         warnings: list[str] = []
-        pages_count = chunks_count = embeddings_count = 0
+        pages_count = chunks_count = embeddings_count = subsection_embeddings_count = 0
         document_id: str | None = None
         json_output_path: Path | None = None
         try:
@@ -198,7 +198,13 @@ class IngestService:
             embedding_service = OpenAIEmbeddingService(self.settings, self.token_counter)
             embeddings = embedding_service.embed_chunks(chunks_with_ids, document_id)
             self.repository.insert_embeddings(embeddings)
-            embeddings_count = len(embeddings)
+            chunk_embeddings_count = len(embeddings)
+
+            subsection_rows = self.repository.get_subsections_for_embedding(document_id)
+            subsection_embeddings = embedding_service.embed_subsections(subsection_rows, document_id)
+            self.repository.insert_subsection_embeddings(subsection_embeddings)
+            subsection_embeddings_count = len(subsection_embeddings)
+            embeddings_count = chunk_embeddings_count + subsection_embeddings_count
 
             if run_id:
                 self.repository.finish_ingestion_run(
@@ -222,6 +228,8 @@ class IngestService:
                 "pages_extracted": pages_count,
                 "chunks_created": chunks_count,
                 "embeddings_created": embeddings_count,
+                "chunk_embeddings_created": embeddings_count - subsection_embeddings_count,
+                "subsection_embeddings_created": subsection_embeddings_count,
                 "book_structure": {
                     "detected_by": book_structure.detected_by,
                     "structures_detected": len(book_structure.chapters),
@@ -277,7 +285,7 @@ class IngestService:
 
         run_id: str | None = None
         warnings: list[str] = []
-        pages_count = chunks_count = embeddings_count = 0
+        pages_count = chunks_count = embeddings_count = subsection_embeddings_count = 0
         document_id: str | None = None
         json_output_path: Path | None = None
         document_key: str | None = None
@@ -425,7 +433,13 @@ class IngestService:
             embedding_service = OpenAIEmbeddingService(self.settings, self.token_counter)
             embeddings = embedding_service.embed_chunks(chunks_with_ids, document_id)
             self.repository.insert_embeddings(embeddings)
-            embeddings_count = len(embeddings)
+            chunk_embeddings_count = len(embeddings)
+
+            subsection_rows = self.repository.get_subsections_for_embedding(document_id)
+            subsection_embeddings = embedding_service.embed_subsections(subsection_rows, document_id)
+            self.repository.insert_subsection_embeddings(subsection_embeddings)
+            subsection_embeddings_count = len(subsection_embeddings)
+            embeddings_count = chunk_embeddings_count + subsection_embeddings_count
 
             if run_id:
                 self.repository.finish_ingestion_run(
@@ -448,6 +462,8 @@ class IngestService:
                 "pages_loaded": pages_count,
                 "chunks_created": chunks_count,
                 "embeddings_created": embeddings_count,
+                "chunk_embeddings_created": embeddings_count - subsection_embeddings_count,
+                "subsection_embeddings_created": subsection_embeddings_count,
                 "book_structure": {
                     "detected_by": book_structure.detected_by,
                     "structures_detected": len(book_structure.chapters),

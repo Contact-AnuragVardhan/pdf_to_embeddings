@@ -9,7 +9,7 @@ from psycopg.rows import dict_row
 
 from db.connection import get_connection
 from ingestion.book_structure import BookChapter, BookStructure, BookSubsection, ChapterResolver
-from ingestion.embedding_service import EmbeddingRecord
+from ingestion.embedding_service import EmbeddingRecord, SubsectionEmbeddingRecord
 
 logger = logging.getLogger(__name__)
 
@@ -304,9 +304,8 @@ class RagRepository:
 
     def insert_chunks(self, document_id: str, chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         columns = [
-            "document_id", "page_start", "page_end", "chunk_index", "book_title", "school_name", "class_name",
-            "subject", "grade", "board", "medium", "language", "detected_language", "chapter_number",
-            "chapter_title", "unit_number", "unit_title", "lesson_title",
+            "document_id", "page_start", "page_end", "chunk_index", "detected_language",
+            "chapter_number", "chapter_title", "unit_number", "unit_title", "lesson_title",
             "section_number", "section_title", "subsection_number", "subsection_title", "topic", "subtopic", "chunk_type", "content_domain", "difficulty_level",
             "pedagogical_role", "content", "content_clean", "content_for_embedding", "summary", "keywords", "important_terms",
             "formulas", "numbers", "question_types", "word_count", "token_count", "char_count", "has_formula",
@@ -349,11 +348,11 @@ class RagRepository:
         metadata: dict[str, Any],
         book_structure: BookStructure | None = None,
     ) -> None:
-        """Store raw page text with book/school/chapter metadata for later reference.
+        """Store raw page text with page/structure metadata for later reference.
 
-        embeddings_pages is kept as the extraction table. This table is a more
-        convenient raw-reference table because it repeats the school/class/book
-        metadata and adds the best-known chapter for each page.
+        Book-level metadata lives in embeddings_documents and is retrieved by
+        joining on document_id. This table keeps only page-specific and
+        structure-specific fields.
         """
         if not pages:
             return
@@ -377,20 +376,14 @@ class RagRepository:
 
         sql = """
         INSERT INTO embeddings_raw_text_pages(
-            document_id, school_name, class_name, grade, subject, book_title,
-            chapter_number, chapter_title, unit_number, unit_title, lesson_title,
+            document_id, chapter_number, chapter_title, unit_number, unit_title, lesson_title,
             section_number, section_title, subsection_number, subsection_title, topic, subtopic,
             page_number, printed_page_number, raw_text, cleaned_text,
             detected_language, word_count, token_count, metadata
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb
         )
         ON CONFLICT(document_id, page_number) DO UPDATE SET
-            school_name=EXCLUDED.school_name,
-            class_name=EXCLUDED.class_name,
-            grade=EXCLUDED.grade,
-            subject=EXCLUDED.subject,
-            book_title=EXCLUDED.book_title,
             chapter_number=EXCLUDED.chapter_number,
             chapter_title=EXCLUDED.chapter_title,
             unit_number=EXCLUDED.unit_number,
@@ -428,11 +421,6 @@ class RagRepository:
             params.append(
                 (
                     document_id,
-                    metadata.get("school_name"),
-                    metadata.get("class_name"),
-                    metadata.get("grade"),
-                    metadata.get("subject"),
-                    metadata.get("book_title") or metadata.get("title"),
                     chapter.get("chapter_number"),
                     chapter.get("chapter_title"),
                     chapter.get("unit_number"),
@@ -485,6 +473,71 @@ class RagRepository:
             with conn.cursor() as cur:
                 cur.executemany(sql, params)
 
+    def get_subsections_for_embedding(self, document_id: str) -> list[dict[str, Any]]:
+        """Return exact subsection/day/exercise rows for subsection-level vectors.
+
+        Important: subsection vectors are created for every subsection that has text,
+        even when include_in_embeddings=false. Some Math subsections are marked
+        include_in_embeddings=false because the production chunk policy excludes
+        OCR-risky pages until QA, but we still store a subsection vector so callers
+        can retrieve every subsection/day/exercise. The include_in_embeddings flag
+        and quality_flags are preserved in the vector metadata for downstream filtering.
+        """
+        sql = """
+        SELECT id::text, document_id::text, chapter_number, chapter_title, unit_number, unit_title, lesson_title,
+               section_number, section_title, subsection_number, subsection_title, anchor_marker,
+               anchor_pdf_page, anchor_printed_page, anchor_detection_method, anchor_raw_heading,
+               pdf_start_page, pdf_end_page, printed_start_page, printed_end_page, page_count,
+               page_numbers, printed_page_numbers, included_exercises_or_activities, includes,
+               subsection_text, subsection_text_plain, text_length_chars, include_in_embeddings,
+               embedding_readiness, text_sources, quality_flags, excluded_related_pages, math_lines, metadata
+        FROM embeddings_book_subsections
+        WHERE document_id = %s
+          AND COALESCE(NULLIF(subsection_text_plain, ''), NULLIF(subsection_text, '')) IS NOT NULL
+        ORDER BY COALESCE(pdf_start_page, 2147483647), section_number, subsection_number, subsection_title
+        """
+        with get_connection(self.database_url) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(sql, (document_id,))
+                return [dict(r) for r in cur.fetchall()]
+
+    def insert_subsection_embeddings(self, records: list[SubsectionEmbeddingRecord]) -> None:
+        if not records:
+            return
+        sql = """
+        INSERT INTO embeddings_subsection_vectors(
+            subsection_id, document_id, embedding_model, embedding_dimensions, embedding,
+            embedding_input_hash, content_for_embedding, token_count, text_was_truncated, metadata
+        ) VALUES (%s, %s, %s, %s, %s::vector, %s, %s, %s, %s, %s::jsonb)
+        ON CONFLICT(subsection_id, embedding_model, embedding_dimensions) DO UPDATE SET
+            document_id=EXCLUDED.document_id,
+            embedding=EXCLUDED.embedding,
+            embedding_input_hash=EXCLUDED.embedding_input_hash,
+            content_for_embedding=EXCLUDED.content_for_embedding,
+            token_count=EXCLUDED.token_count,
+            text_was_truncated=EXCLUDED.text_was_truncated,
+            metadata=EXCLUDED.metadata,
+            created_at=now()
+        """
+        params = [
+            (
+                r.subsection_id,
+                r.document_id,
+                r.embedding_model,
+                r.embedding_dimensions,
+                to_pgvector(r.embedding),
+                r.embedding_input_hash,
+                r.content_for_embedding,
+                r.token_count,
+                r.text_was_truncated,
+                _json(r.metadata or {}),
+            )
+            for r in records
+        ]
+        with get_connection(self.database_url) as conn, conn.transaction():
+            with conn.cursor() as cur:
+                cur.executemany(sql, params)
+
     def get_document_summary(self, document_id: str | None = None, file_hash: str | None = None, document_key: str | None = None) -> dict[str, Any] | None:
         if document_id:
             where = "d.id=%s"
@@ -497,19 +550,25 @@ class RagRepository:
             value = file_hash
         if not value:
             return None
+        # Do not join chunks/vectors/subsections in one query here.
+        # Joining all child tables creates a large cross product after subsection vectors are added
+        # (for example chunks * vectors * subsections * subsection_vectors), which can make the
+        # final CLI summary appear to hang even after ingestion has already completed.
         sql = f"""
         SELECT d.id, d.title, d.book_title, d.school_name, d.class_name, d.subject, d.grade, d.language,
                d.primary_language, d.content_profile, d.chunking_strategy, d.chunk_max_tokens, d.chunk_overlap_tokens,
                d.document_key, d.file_name, d.file_hash, d.total_pages, d.total_words, d.total_tokens,
-               COUNT(DISTINCT c.id)::int AS chunks,
-               COUNT(DISTINCT s.id)::int AS subsections,
-               COUNT(DISTINCT v.id)::int AS embeddings
+               (SELECT COUNT(*)::int FROM embeddings_chunks c WHERE c.document_id = d.id) AS chunks,
+               (SELECT COUNT(*)::int FROM embeddings_book_subsections s WHERE s.document_id = d.id) AS subsections,
+               (SELECT COUNT(*)::int FROM embeddings_vectors v WHERE v.document_id = d.id) AS embeddings,
+               (SELECT COUNT(*)::int FROM embeddings_subsection_vectors sv WHERE sv.document_id = d.id) AS subsection_embeddings,
+               (
+                   (SELECT COUNT(*)::int FROM embeddings_vectors v WHERE v.document_id = d.id)
+                   +
+                   (SELECT COUNT(*)::int FROM embeddings_subsection_vectors sv WHERE sv.document_id = d.id)
+               ) AS total_embeddings
         FROM embeddings_documents d
-        LEFT JOIN embeddings_chunks c ON c.document_id=d.id
-        LEFT JOIN embeddings_vectors v ON v.document_id=d.id
-        LEFT JOIN embeddings_book_subsections s ON s.document_id=d.id
         WHERE {where}
-        GROUP BY d.id
         """
         with get_connection(self.database_url) as conn:
             with conn.cursor(row_factory=dict_row) as cur:
@@ -522,13 +581,14 @@ class RagRepository:
         params = [to_pgvector(query_embedding)] + params + [limit]
         sql = f"""
         SELECT c.id::text AS chunk_id,
-               c.content, c.content_clean, c.book_title, c.school_name, c.class_name, c.subject, c.grade, c.language,
+               c.content, c.content_clean, d.book_title, d.school_name, d.class_name, d.subject, d.grade, d.language,
                c.chapter_title, c.unit_title, c.lesson_title, c.section_title, c.subsection_number, c.subsection_title, c.topic, c.chunk_type, c.page_start, c.page_end,
                c.source_label, c.citation_text,
                GREATEST(0, 1 - (v.embedding <=> %s::vector)) AS vector_score,
                0.0::float AS keyword_score
         FROM embeddings_vectors v
         JOIN embeddings_chunks c ON c.id = v.chunk_id
+        JOIN embeddings_documents d ON d.id = c.document_id
         {where}
         ORDER BY v.embedding <=> %s::vector
         LIMIT %s
@@ -545,17 +605,21 @@ class RagRepository:
         prefix = "WHERE" if not where else where + " AND"
         sql = f"""
         SELECT c.id::text AS chunk_id,
-               c.content, c.content_clean, c.book_title, c.school_name, c.class_name, c.subject, c.grade, c.language,
+               c.content, c.content_clean, d.book_title, d.school_name, d.class_name, d.subject, d.grade, d.language,
                c.chapter_title, c.unit_title, c.lesson_title, c.section_title, c.subsection_number, c.subsection_title, c.topic, c.chunk_type, c.page_start, c.page_end,
                c.source_label, c.citation_text,
                0.0::float AS vector_score,
                ts_rank_cd(c.search_vector, websearch_to_tsquery('simple', %s))::float AS keyword_score
         FROM embeddings_chunks c
-        {prefix} c.search_vector @@ websearch_to_tsquery('simple', %s)
+        JOIN embeddings_documents d ON d.id = c.document_id
+        {prefix} (
+            c.search_vector @@ websearch_to_tsquery('simple', %s)
+            OR to_tsvector('simple', coalesce(d.school_name, '') || ' ' || coalesce(d.class_name, '') || ' ' || coalesce(d.book_title, '') || ' ' || coalesce(d.subject, '') || ' ' || coalesce(d.grade, '') || ' ' || coalesce(d.board, '') || ' ' || coalesce(d.language, '')) @@ websearch_to_tsquery('simple', %s)
+        )
         ORDER BY keyword_score DESC
         LIMIT %s
         """
-        params = [query] + filter_params + [query, limit] if where else [query, query, limit]
+        params = [query] + filter_params + [query, query, limit] if where else [query, query, query, limit]
         with get_connection(self.database_url) as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(sql, params)
@@ -838,11 +902,17 @@ class RagRepository:
     def _build_filter_sql(self, filters: dict[str, Any], table_alias: str = "c") -> tuple[str, list[Any]]:
         clauses: list[str] = []
         params: list[Any] = []
-        exact_fields = ["subject", "school_name", "grade", "class_name", "language", "board", "document_id", "chunk_type", "book_title"]
-        for field in exact_fields:
+        chunk_exact_fields = ["document_id", "chunk_type"]
+        document_exact_fields = ["subject", "school_name", "grade", "class_name", "language", "board", "book_title"]
+        for field in chunk_exact_fields:
             value = filters.get(field)
             if value:
                 clauses.append(f"{table_alias}.{field} = %s")
+                params.append(value)
+        for field in document_exact_fields:
+            value = filters.get(field)
+            if value:
+                clauses.append(f"d.{field} = %s")
                 params.append(value)
         if filters.get("chapter_title"):
             clauses.append(f"{table_alias}.chapter_title ILIKE %s")
