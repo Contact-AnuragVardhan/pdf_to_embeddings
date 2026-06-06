@@ -106,6 +106,7 @@ CREATE TABLE IF NOT EXISTS embeddings_book_chapters (
     section_number text,
     section_title text,
     lesson_title text,
+    section_key text,
     structure_type text DEFAULT 'chapter',
     printed_start_page int,
     printed_end_page int,
@@ -125,30 +126,120 @@ ALTER TABLE embeddings_book_chapters ADD COLUMN IF NOT EXISTS unit_title text;
 ALTER TABLE embeddings_book_chapters ADD COLUMN IF NOT EXISTS section_number text;
 ALTER TABLE embeddings_book_chapters ADD COLUMN IF NOT EXISTS section_title text;
 ALTER TABLE embeddings_book_chapters ADD COLUMN IF NOT EXISTS lesson_title text;
+ALTER TABLE embeddings_book_chapters ADD COLUMN IF NOT EXISTS section_key text;
 ALTER TABLE embeddings_book_chapters ADD COLUMN IF NOT EXISTS structure_type text DEFAULT 'chapter';
 
--- Older versions used a chapter-only uniqueness constraint. That blocked multiple
--- section rows under the same chapter. JSON ingestion can be section-level, so
--- uniqueness must include unit/section/lesson/page identity too.
+-- Stable parent structure key used for both normal chapter books and unit/section books.
+-- Math chapters: section_key = chapter_number (1, 2, 3, ...)
+-- Poorvi sections: section_key = section_number (1.1, 1.2, ...)
+-- This prevents multiple lessons under the same Unit from collapsing into one row.
+UPDATE embeddings_book_chapters
+SET section_key = COALESCE(NULLIF(section_key, ''), NULLIF(section_number, ''), NULLIF(chapter_number, ''), NULLIF(lesson_title, ''), NULLIF(section_title, ''), NULLIF(chapter_title, ''))
+WHERE section_key IS NULL OR section_key = '';
+
 ALTER TABLE embeddings_book_chapters
     DROP CONSTRAINT IF EXISTS embeddings_book_chapters_document_id_chapter_number_chapter_title_key;
-CREATE UNIQUE INDEX IF NOT EXISTS embeddings_book_chapters_unique_structure_idx
-ON embeddings_book_chapters(
-    document_id,
-    COALESCE(chapter_number, ''),
-    COALESCE(chapter_title, ''),
-    COALESCE(unit_number, ''),
-    COALESCE(unit_title, ''),
-    COALESCE(section_number, ''),
-    COALESCE(section_title, ''),
-    COALESCE(lesson_title, ''),
-    COALESCE(pdf_start_page, -1),
-    COALESCE(pdf_end_page, -1)
-);
+ALTER TABLE embeddings_book_chapters
+    DROP CONSTRAINT IF EXISTS embeddings_book_chapters_document_id_chapter_number_key;
+DROP INDEX IF EXISTS embeddings_book_chapters_unique_structure_idx;
+DROP INDEX IF EXISTS idx_book_chapters_document_chapter_unique;
+DROP INDEX IF EXISTS idx_book_chapters_document_section_unique;
+DROP INDEX IF EXISTS idx_book_chapters_document_section_key_unique;
+
+-- If an older migration accidentally inserted duplicate parent rows for the same
+-- document/section_key, keep the newest row before creating the unique index.
+DELETE FROM embeddings_book_chapters older
+USING embeddings_book_chapters newer
+WHERE older.document_id = newer.document_id
+  AND COALESCE(older.section_key, '') = COALESCE(newer.section_key, '')
+  AND older.ctid < newer.ctid;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_book_chapters_document_section_key_unique
+ON embeddings_book_chapters(document_id, section_key);
 
 DROP TRIGGER IF EXISTS embeddings_book_chapters_touch_updated_at ON embeddings_book_chapters;
 CREATE TRIGGER embeddings_book_chapters_touch_updated_at
 BEFORE UPDATE ON embeddings_book_chapters
+FOR EACH ROW EXECUTE FUNCTION embeddings_touch_updated_at();
+
+
+CREATE TABLE IF NOT EXISTS embeddings_book_subsections (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id uuid REFERENCES embeddings_documents(id) ON DELETE CASCADE,
+    chapter_number text,
+    chapter_title text,
+    unit_number text,
+    unit_title text,
+    lesson_title text,
+    section_number text,
+    section_title text,
+    subsection_number text,
+    subsection_title text,
+    anchor_marker text,
+    anchor_pdf_page int,
+    anchor_printed_page int,
+    anchor_detection_method text,
+    anchor_raw_heading text,
+    pdf_start_page int,
+    pdf_end_page int,
+    printed_start_page int,
+    printed_end_page int,
+    page_count int,
+    page_numbers int[],
+    printed_page_numbers int[],
+    included_exercises_or_activities text[],
+    includes text[],
+    subsection_text text,
+    subsection_text_plain text,
+    text_length_chars int,
+    include_in_embeddings boolean DEFAULT true,
+    embedding_readiness text,
+    text_sources text[],
+    quality_flags text[],
+    excluded_related_pages jsonb DEFAULT '[]'::jsonb,
+    math_lines text[],
+    metadata jsonb DEFAULT '{}'::jsonb,
+    created_at timestamptz DEFAULT now(),
+    updated_at timestamptz DEFAULT now()
+);
+
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS chapter_number text;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS chapter_title text;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS unit_number text;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS unit_title text;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS lesson_title text;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS section_number text;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS section_title text;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS subsection_number text;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS subsection_title text;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS anchor_marker text;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS anchor_pdf_page int;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS anchor_printed_page int;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS anchor_detection_method text;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS anchor_raw_heading text;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS pdf_start_page int;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS pdf_end_page int;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS printed_start_page int;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS printed_end_page int;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS page_count int;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS page_numbers int[];
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS printed_page_numbers int[];
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS included_exercises_or_activities text[];
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS includes text[];
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS subsection_text text;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS subsection_text_plain text;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS text_length_chars int;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS include_in_embeddings boolean DEFAULT true;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS embedding_readiness text;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS text_sources text[];
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS quality_flags text[];
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS excluded_related_pages jsonb DEFAULT '[]'::jsonb;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS math_lines text[];
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS metadata jsonb DEFAULT '{}'::jsonb;
+
+DROP TRIGGER IF EXISTS embeddings_book_subsections_touch_updated_at ON embeddings_book_subsections;
+CREATE TRIGGER embeddings_book_subsections_touch_updated_at
+BEFORE UPDATE ON embeddings_book_subsections
 FOR EACH ROW EXECUTE FUNCTION embeddings_touch_updated_at();
 
 CREATE TABLE IF NOT EXISTS embeddings_chunks (
@@ -175,6 +266,7 @@ CREATE TABLE IF NOT EXISTS embeddings_chunks (
     lesson_title text,
     section_number text,
     section_title text,
+    subsection_number text,
     subsection_title text,
     topic text,
     subtopic text,
@@ -227,6 +319,8 @@ ALTER TABLE embeddings_chunks ADD COLUMN IF NOT EXISTS unit_title text;
 ALTER TABLE embeddings_chunks ADD COLUMN IF NOT EXISTS section_number text;
 ALTER TABLE embeddings_chunks ADD COLUMN IF NOT EXISTS section_title text;
 ALTER TABLE embeddings_chunks ADD COLUMN IF NOT EXISTS lesson_title text;
+ALTER TABLE embeddings_chunks ADD COLUMN IF NOT EXISTS subsection_number text;
+ALTER TABLE embeddings_chunks ADD COLUMN IF NOT EXISTS subsection_title text;
 
 CREATE TABLE IF NOT EXISTS embeddings_raw_text_pages (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -243,6 +337,7 @@ CREATE TABLE IF NOT EXISTS embeddings_raw_text_pages (
     lesson_title text,
     section_number text,
     section_title text,
+    subsection_number text,
     subsection_title text,
     topic text,
     subtopic text,
@@ -265,6 +360,7 @@ ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS unit_title text;
 ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS lesson_title text;
 ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS section_number text;
 ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS section_title text;
+ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS subsection_number text;
 ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS subsection_title text;
 ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS topic text;
 ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS subtopic text;
@@ -285,6 +381,7 @@ BEGIN
         setweight(to_tsvector('simple', coalesce(NEW.unit_title, '')), 'A') ||
         setweight(to_tsvector('simple', coalesce(NEW.lesson_title, '')), 'A') ||
         setweight(to_tsvector('simple', coalesce(NEW.section_title, '')), 'A') ||
+        setweight(to_tsvector('simple', coalesce(NEW.subsection_title, '')), 'A') ||
         setweight(to_tsvector('simple', coalesce(NEW.topic, '')), 'B') ||
         setweight(to_tsvector('simple', coalesce(NEW.content_clean, '')), 'C');
     RETURN NEW;
@@ -298,7 +395,7 @@ FOR EACH ROW EXECUTE FUNCTION embeddings_touch_updated_at();
 
 DROP TRIGGER IF EXISTS embeddings_chunks_search_vector_trigger ON embeddings_chunks;
 CREATE TRIGGER embeddings_chunks_search_vector_trigger
-BEFORE INSERT OR UPDATE OF school_name, class_name, book_title, chapter_title, unit_title, lesson_title, section_title, topic, content_clean
+BEFORE INSERT OR UPDATE OF school_name, class_name, book_title, chapter_title, unit_title, lesson_title, section_title, subsection_title, topic, content_clean
 ON embeddings_chunks
 FOR EACH ROW EXECUTE FUNCTION embeddings_chunks_search_vector_update();
 
@@ -346,6 +443,7 @@ CREATE INDEX IF NOT EXISTS embeddings_documents_content_profile_idx ON embedding
 CREATE INDEX IF NOT EXISTS embeddings_pages_document_page_idx ON embeddings_pages(document_id, page_number);
 
 CREATE INDEX IF NOT EXISTS embeddings_book_chapters_document_idx ON embeddings_book_chapters(document_id);
+CREATE INDEX IF NOT EXISTS embeddings_book_chapters_section_key_idx ON embeddings_book_chapters(document_id, section_key);
 CREATE INDEX IF NOT EXISTS embeddings_book_chapters_title_idx ON embeddings_book_chapters(chapter_title);
 CREATE INDEX IF NOT EXISTS embeddings_book_chapters_pdf_range_idx ON embeddings_book_chapters(document_id, pdf_start_page, pdf_end_page);
 
@@ -353,6 +451,13 @@ CREATE INDEX IF NOT EXISTS embeddings_raw_text_pages_document_page_idx ON embedd
 CREATE INDEX IF NOT EXISTS embeddings_raw_text_pages_printed_page_idx ON embeddings_raw_text_pages(document_id, printed_page_number);
 CREATE INDEX IF NOT EXISTS embeddings_raw_text_pages_chapter_idx ON embeddings_raw_text_pages(chapter_title);
 CREATE INDEX IF NOT EXISTS embeddings_raw_text_pages_school_class_idx ON embeddings_raw_text_pages(school_name, class_name);
+
+CREATE INDEX IF NOT EXISTS embeddings_book_subsections_document_idx ON embeddings_book_subsections(document_id);
+CREATE INDEX IF NOT EXISTS embeddings_book_subsections_chapter_idx ON embeddings_book_subsections(document_id, chapter_number, chapter_title);
+CREATE INDEX IF NOT EXISTS embeddings_book_subsections_section_idx ON embeddings_book_subsections(document_id, section_number, section_title);
+CREATE INDEX IF NOT EXISTS embeddings_book_subsections_subsection_idx ON embeddings_book_subsections(document_id, subsection_number, subsection_title);
+CREATE INDEX IF NOT EXISTS embeddings_book_subsections_pdf_range_idx ON embeddings_book_subsections(document_id, pdf_start_page, pdf_end_page);
+CREATE INDEX IF NOT EXISTS embeddings_book_subsections_metadata_idx ON embeddings_book_subsections USING GIN(metadata);
 
 CREATE INDEX IF NOT EXISTS embeddings_chunks_document_idx ON embeddings_chunks(document_id);
 CREATE INDEX IF NOT EXISTS embeddings_chunks_school_class_idx ON embeddings_chunks(school_name, class_name);
@@ -382,5 +487,7 @@ $$;
 
 CREATE INDEX IF NOT EXISTS idx_embeddings_chunks_unit_title ON embeddings_chunks(document_id, unit_title);
 CREATE INDEX IF NOT EXISTS idx_embeddings_chunks_section_title ON embeddings_chunks(document_id, section_title);
+CREATE INDEX IF NOT EXISTS idx_embeddings_chunks_subsection_title ON embeddings_chunks(document_id, subsection_title);
 CREATE INDEX IF NOT EXISTS idx_embeddings_raw_text_pages_section_title ON embeddings_raw_text_pages(document_id, section_title);
+CREATE INDEX IF NOT EXISTS idx_embeddings_raw_text_pages_subsection_title ON embeddings_raw_text_pages(document_id, subsection_title);
 CREATE INDEX IF NOT EXISTS idx_embeddings_book_chapters_structure ON embeddings_book_chapters(document_id, structure_type, unit_number, section_number);

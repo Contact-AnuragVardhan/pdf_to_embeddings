@@ -80,6 +80,37 @@ def extraction_output_options(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def add_structure_query_args(parser: argparse.ArgumentParser, *, include_subsection: bool = False) -> None:
+    parser.add_argument("--document-id", help="Document UUID from embeddings_documents.id.")
+    parser.add_argument("--document-key", help="Stable document key, e.g. mother-miracle-class-7-maths-rsaggarwal.")
+    parser.add_argument("--chapter-number")
+    parser.add_argument("--chapter-title")
+    parser.add_argument("--unit-number")
+    parser.add_argument("--unit-title")
+    parser.add_argument("--section-number")
+    parser.add_argument("--section-title")
+    if include_subsection:
+        parser.add_argument("--subsection-number")
+        parser.add_argument("--subsection-title")
+
+
+def _structure_query_kwargs(args: argparse.Namespace, *, include_subsection: bool = False) -> dict[str, Any]:
+    kwargs = {
+        "document_id": getattr(args, "document_id", None),
+        "document_key": getattr(args, "document_key", None),
+        "chapter_number": getattr(args, "chapter_number", None),
+        "chapter_title": getattr(args, "chapter_title", None),
+        "unit_number": getattr(args, "unit_number", None),
+        "unit_title": getattr(args, "unit_title", None),
+        "section_number": getattr(args, "section_number", None),
+        "section_title": getattr(args, "section_title", None),
+    }
+    if include_subsection:
+        kwargs["subsection_number"] = getattr(args, "subsection_number", None)
+        kwargs["subsection_title"] = getattr(args, "subsection_title", None)
+    return kwargs
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pdf_embedding_pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -130,9 +161,24 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--board")
     search.add_argument("--document-id")
     search.add_argument("--chapter-title")
+    search.add_argument("--unit-title")
+    search.add_argument("--section-title")
+    search.add_argument("--subsection-title")
     search.add_argument("--chunk-type")
     search.add_argument("--top-k", type=int, default=8)
     search.set_defaults(handler=handle_search)
+
+    chapter_text = sub.add_parser("chapter-text", help="Fetch raw text and pages for one chapter/section.")
+    add_structure_query_args(chapter_text)
+    chapter_text.set_defaults(handler=handle_chapter_text)
+
+    list_subsections = sub.add_parser("list-subsections", help="List stored subsections/day/exercise ranges for a document/chapter/section.")
+    add_structure_query_args(list_subsections)
+    list_subsections.set_defaults(handler=handle_list_subsections)
+
+    subsection_text = sub.add_parser("subsection-text", help="Fetch exact text and pages for one or more stored subsections.")
+    add_structure_query_args(subsection_text, include_subsection=True)
+    subsection_text.set_defaults(handler=handle_subsection_text)
     return parser
 
 
@@ -247,6 +293,7 @@ def handle_ingest_json(args: argparse.Namespace, settings: Settings) -> None:
                     "language": loaded.metadata.get("language"),
                     "pages_detected": len(loaded.pages),
                     "structures_detected": len(loaded.book_structure.chapters),
+                    "subsections_detected": len(loaded.book_structure.subsections),
                     "warnings": loaded.warnings,
                 },
                 default=str,
@@ -319,11 +366,32 @@ def handle_search(args: argparse.Namespace, settings: Settings) -> None:
             "board": args.board,
             "document_id": args.document_id,
             "chapter_title": args.chapter_title,
+            "unit_title": args.unit_title,
+            "section_title": args.section_title,
+            "subsection_title": args.subsection_title,
             "chunk_type": args.chunk_type,
         },
     )
     service.print_results(results)
 
+
+
+def handle_chapter_text(args: argparse.Namespace, settings: Settings) -> None:
+    repository = RagRepository(settings.database_url)
+    result = repository.get_chapter_text(**_structure_query_kwargs(args))
+    console.print_json(json=json.dumps(result, default=str, ensure_ascii=False, indent=2))
+
+
+def handle_list_subsections(args: argparse.Namespace, settings: Settings) -> None:
+    repository = RagRepository(settings.database_url)
+    result = repository.list_subsections(**_structure_query_kwargs(args))
+    console.print_json(json=json.dumps(result, default=str, ensure_ascii=False, indent=2))
+
+
+def handle_subsection_text(args: argparse.Namespace, settings: Settings) -> None:
+    repository = RagRepository(settings.database_url)
+    result = repository.get_subsection_text(**_structure_query_kwargs(args, include_subsection=True))
+    console.print_json(json=json.dumps(result, default=str, ensure_ascii=False, indent=2))
 
 def main() -> None:
     settings = Settings.load()

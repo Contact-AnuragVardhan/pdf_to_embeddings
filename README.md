@@ -97,7 +97,7 @@ LOG_LEVEL=INFO
 This deletes only the embedding pipeline tables.
 
 ```powershell
-python -c "from dotenv import load_dotenv; import os, psycopg; load_dotenv(); conn=psycopg.connect(os.environ['DATABASE_URL'], autocommit=True); cur=conn.cursor(); cur.execute('DROP TABLE IF EXISTS public.embeddings_vectors CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_raw_text_pages CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_book_chapters CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_chunks CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_pages CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_ingestion_runs CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_documents CASCADE'); conn.close(); print('Embedding tables deleted')"
+python -c "from dotenv import load_dotenv; import os, psycopg; load_dotenv(); conn=psycopg.connect(os.environ['DATABASE_URL'], autocommit=True); cur=conn.cursor(); cur.execute('DROP TABLE IF EXISTS public.embeddings_vectors CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_raw_text_pages CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_book_subsections CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_book_chapters CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_chunks CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_pages CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_ingestion_runs CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_documents CASCADE'); conn.close(); print('Embedding tables deleted')"
 ```
 
 Then recreate:
@@ -513,3 +513,90 @@ python app/main.py search --query "multiplication of decimal by decimal" --schoo
 ```
 
 If all three return the right chapter/page content, retrieval is good enough for first testing.
+
+## Subsection/day/exercise storage
+
+The pipeline now stores subsection ranges from production JSON in a separate table:
+
+```text
+embeddings_book_subsections
+```
+
+This table is populated from JSON shapes like:
+
+```text
+extraction.section_index[*].subsections[*]
+extraction.chapters[*].subsections[*]
+extraction.chapters[*].lessons[*].subsections[*]
+```
+
+It stores exact subsection/page metadata such as `subsection_number`, `subsection_title`, parent chapter/section fields, PDF page range, printed page range, page arrays, includes/activities, quality flags, math lines, and the production subsection text.
+
+After pulling this update, run the schema migration:
+
+```powershell
+python app/main.py init-db
+```
+
+Then reindex any JSON document so subsection rows are backfilled:
+
+```powershell
+python app/main.py ingest-json --json "json_input/English_Poorvi.json" --reindex
+python app/main.py ingest-json --json "json_input/Maths_RSAgarwal.json" --reindex
+```
+
+List subsection ranges for a lesson/chapter:
+
+```powershell
+python app/main.py list-subsections `
+  --document-key "mother-miracle-class-6-english-poorvi" `
+  --section-title "A Bottle of Dew"
+
+python app/main.py list-subsections `
+  --document-key "mother-miracle-class-7-maths-rsaggarwal" `
+  --chapter-number "1"
+```
+
+Fetch exact subsection text and pages:
+
+```powershell
+python app/main.py subsection-text `
+  --document-key "mother-miracle-class-6-english-poorvi" `
+  --section-number "1.1" `
+  --subsection-number "1.1.1"
+
+python app/main.py subsection-text `
+  --document-key "mother-miracle-class-7-maths-rsaggarwal" `
+  --chapter-number "1" `
+  --subsection-number "1.1"
+```
+
+Fetch broader chapter/section page text from `embeddings_raw_text_pages`:
+
+```powershell
+python app/main.py chapter-text `
+  --document-key "mother-miracle-class-7-maths-rsaggarwal" `
+  --chapter-number "1"
+
+python app/main.py chapter-text `
+  --document-key "mother-miracle-class-6-english-poorvi" `
+  --section-number "1.1"
+```
+
+Useful SQL checks:
+
+```sql
+SELECT d.document_key, count(*) AS subsection_count
+FROM embeddings_book_subsections s
+JOIN embeddings_documents d ON d.id = s.document_id
+GROUP BY d.document_key
+ORDER BY d.document_key;
+
+SELECT subsection_number, subsection_title, pdf_start_page, pdf_end_page,
+       printed_start_page, printed_end_page, page_numbers, printed_page_numbers
+FROM embeddings_book_subsections s
+JOIN embeddings_documents d ON d.id = s.document_id
+WHERE d.document_key = 'mother-miracle-class-7-maths-rsaggarwal'
+  AND s.chapter_number = '1'
+ORDER BY s.pdf_start_page;
+```

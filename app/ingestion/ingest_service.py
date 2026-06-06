@@ -150,6 +150,7 @@ class IngestService:
                     "file_hash": file_hash,
                     "pages_extracted": pages_count,
                     "chunks_created": chunks_count,
+                    "subsections_detected": len(book_structure.subsections),
                     "detected_language": detected_language,
                     "metadata": metadata,
                     "book_structure": book_structure.to_dict(),
@@ -187,6 +188,7 @@ class IngestService:
             )
             document_id = self.repository.upsert_document(document)
             self.repository.insert_book_chapters(document_id, book_structure.chapters)
+            self.repository.insert_book_subsections(document_id, book_structure.subsections)
             pages_as_dicts = [asdict(p) for p in pages]
             self.repository.insert_pages(document_id, pages_as_dicts)
             chunks_with_ids = self.repository.insert_chunks(document_id, chunks)
@@ -225,6 +227,7 @@ class IngestService:
                     "structures_detected": len(book_structure.chapters),
                     "chapters_detected": len([c for c in book_structure.chapters if c.chapter_title]),
                     "sections_detected": len([c for c in book_structure.chapters if c.section_title]),
+                    "subsections_detected": len(book_structure.subsections),
                     "content_profile": book_structure.content_profile,
                 },
                 "chunking_plan": chunking_plan.to_dict(),
@@ -372,6 +375,7 @@ class IngestService:
                     "json_input_hash": json_input_hash,
                     "pages_loaded": pages_count,
                     "chunks_created": chunks_count,
+                    "subsections_detected": len(book_structure.subsections),
                     "detected_language": detected_language,
                     "metadata": metadata,
                     "book_structure": book_structure.to_dict(),
@@ -411,6 +415,7 @@ class IngestService:
             )
             document_id = self.repository.upsert_document_by_document_key(document)
             self.repository.insert_book_chapters(document_id, book_structure.chapters)
+            self.repository.insert_book_subsections(document_id, book_structure.subsections)
             pages_as_dicts = [asdict(p) for p in pages]
             self.repository.insert_pages(document_id, pages_as_dicts)
             chunks_with_ids = self.repository.insert_chunks(document_id, chunks)
@@ -448,6 +453,7 @@ class IngestService:
                     "structures_detected": len(book_structure.chapters),
                     "chapters_detected": len([c for c in book_structure.chapters if c.chapter_title]),
                     "sections_detected": len([c for c in book_structure.chapters if c.section_title]),
+                    "subsections_detected": len(book_structure.subsections),
                     "content_profile": book_structure.content_profile,
                 },
                 "chunking_plan": chunking_plan.to_dict(),

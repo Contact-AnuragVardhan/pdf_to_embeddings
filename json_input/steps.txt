@@ -1,0 +1,12 @@
+python app/main.py init-db
+
+python app/main.py ingest-json --json "json_input/Maths_RSAgarwal_math_aware_extraction_v4_production_safe.json" --reindex
+
+python validation_script/validate_math_rsaggarwal_db.py --json "json_input/Maths_RSAgarwal_math_aware_extraction_v4_production_safe.json"
+python validation_script/validate_math_rsaggarwal_db.py --json "json_input/Maths_RSAgarwal_math_aware_extraction_v4_production_safe.json" --db
+
+
+python app/main.py ingest-json --json "json_input/English_Poorvi_production_ready.json" --reindex
+validate:
+python validation_script/validate_english_poorvi_db.py --json "json_input/English_Poorvi_production_ready.json"
+python validation_script/validate_english_poorvi_db.py --json "json_input/English_Poorvi_production_ready.json" --db

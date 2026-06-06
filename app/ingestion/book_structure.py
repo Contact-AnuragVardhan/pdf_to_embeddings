@@ -24,6 +24,9 @@ class BookChapter:
     section_number: str | None = None
     section_title: str | None = None
     lesson_title: str | None = None
+    # Stable DB key for this parent row. For normal chapter books this is the
+    # chapter number; for unit/section books such as Poorvi this is section_number.
+    section_key: str | None = None
     structure_type: str = "chapter"  # chapter | section | unit | lesson | answers
     printed_start_page: int | None = None
     printed_end_page: int | None = None
@@ -32,6 +35,18 @@ class BookChapter:
     confidence: float | None = None
     detected_by: str = "unknown"
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.section_key:
+            self.section_key = (
+                self.section_number
+                or self.chapter_number
+                or self.lesson_title
+                or self.section_title
+                or self.chapter_title
+                or self.unit_number
+                or self.unit_title
+            )
 
     @property
     def display_title(self) -> str | None:
@@ -50,6 +65,7 @@ class BookChapter:
             "section_number": self.section_number,
             "section_title": self.section_title,
             "lesson_title": self.lesson_title,
+            "section_key": self.section_key,
             "structure_type": self.structure_type,
             "printed_start_page": self.printed_start_page,
             "printed_end_page": self.printed_end_page,
@@ -57,6 +73,92 @@ class BookChapter:
             "pdf_end_page": self.pdf_end_page,
             "confidence": self.confidence,
             "detected_by": self.detected_by,
+            "metadata": self.metadata or {},
+        }
+
+
+@dataclass
+class BookSubsection:
+    """Subsection/day/exercise range under a chapter or section.
+
+    This is intentionally separate from BookChapter because a single lesson can
+    have many day/exercise ranges. The DB stores these rows in
+    embeddings_book_subsections so callers can fetch exact text and page ranges
+    without relying on broad chapter chunks.
+    """
+
+    chapter_number: str | None = None
+    chapter_title: str | None = None
+    unit_number: str | None = None
+    unit_title: str | None = None
+    section_number: str | None = None
+    section_title: str | None = None
+    lesson_title: str | None = None
+    subsection_number: str | None = None
+    subsection_title: str | None = None
+    anchor_marker: str | None = None
+    anchor_pdf_page: int | None = None
+    anchor_printed_page: int | None = None
+    anchor_detection_method: str | None = None
+    anchor_raw_heading: str | None = None
+    included_exercises_or_activities: list[str] = field(default_factory=list)
+    includes: list[str] = field(default_factory=list)
+    pdf_start_page: int | None = None
+    pdf_end_page: int | None = None
+    printed_start_page: int | None = None
+    printed_end_page: int | None = None
+    page_numbers: list[int] = field(default_factory=list)
+    printed_page_numbers: list[int] = field(default_factory=list)
+    page_count: int | None = None
+    subsection_text: str | None = None
+    subsection_text_plain: str | None = None
+    text_length_chars: int | None = None
+    include_in_embeddings: bool | None = True
+    embedding_readiness: str | None = None
+    text_sources: list[str] = field(default_factory=list)
+    quality_flags: list[str] = field(default_factory=list)
+    excluded_related_pages: list[dict[str, Any]] = field(default_factory=list)
+    math_lines: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def display_title(self) -> str | None:
+        return self.subsection_title or self.anchor_marker
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "chapter_number": self.chapter_number,
+            "chapter_title": self.chapter_title,
+            "unit_number": self.unit_number,
+            "unit_title": self.unit_title,
+            "section_number": self.section_number,
+            "section_title": self.section_title,
+            "lesson_title": self.lesson_title,
+            "subsection_number": self.subsection_number,
+            "subsection_title": self.subsection_title,
+            "anchor_marker": self.anchor_marker,
+            "anchor_pdf_page": self.anchor_pdf_page,
+            "anchor_printed_page": self.anchor_printed_page,
+            "anchor_detection_method": self.anchor_detection_method,
+            "anchor_raw_heading": self.anchor_raw_heading,
+            "included_exercises_or_activities": self.included_exercises_or_activities,
+            "includes": self.includes,
+            "pdf_start_page": self.pdf_start_page,
+            "pdf_end_page": self.pdf_end_page,
+            "printed_start_page": self.printed_start_page,
+            "printed_end_page": self.printed_end_page,
+            "page_numbers": self.page_numbers,
+            "printed_page_numbers": self.printed_page_numbers,
+            "page_count": self.page_count,
+            "has_subsection_text": bool(self.subsection_text),
+            "has_subsection_text_plain": bool(self.subsection_text_plain),
+            "text_length_chars": self.text_length_chars,
+            "include_in_embeddings": self.include_in_embeddings,
+            "embedding_readiness": self.embedding_readiness,
+            "text_sources": self.text_sources,
+            "quality_flags": self.quality_flags,
+            "excluded_related_pages": self.excluded_related_pages,
+            "math_line_count": len(self.math_lines or []),
             "metadata": self.metadata or {},
         }
 
@@ -80,6 +182,7 @@ class BookStructure:
     confidence: float | None = None
     detected_by: str = "unknown"
     chapters: list[BookChapter] = field(default_factory=list)
+    subsections: list[BookSubsection] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -101,6 +204,7 @@ class BookStructure:
             "confidence": self.confidence,
             "detected_by": self.detected_by,
             "chapters": [c.to_dict() for c in self.chapters],
+            "subsections": [s.to_dict() for s in self.subsections],
             "metadata": self.metadata or {},
         }
 

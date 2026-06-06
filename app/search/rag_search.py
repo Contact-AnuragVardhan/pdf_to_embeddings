@@ -62,7 +62,7 @@ class RagSearchService:
         if filters.get("language") and row.get("language") == filters["language"]:
             score += 0.20
         query_terms = {t.lower() for t in re.findall(r"[A-Za-z\u0900-\u097F]{3,}", query)}
-        text = " ".join(str(row.get(k) or "") for k in ["school_name", "book_title", "topic", "chapter_title", "section_title", "chunk_type"]).lower()
+        text = " ".join(str(row.get(k) or "") for k in ["school_name", "book_title", "topic", "chapter_title", "section_title", "subsection_title", "chunk_type"]).lower()
         if any(term in text for term in query_terms):
             score += 0.20
         if row.get("chunk_type") in {"definition", "explanation", "example", "activity", "grammar_rule", "worked_example"}:
@@ -86,7 +86,7 @@ class RagSearchService:
             table.add_row(
                 str(i),
                 f"{float(row.get('final_score') or 0):.4f}",
-                row.get("source_label") or row.get("book_title") or "",
+                row.get("source_label") or row.get("subsection_title") or row.get("book_title") or "",
                 row.get("chunk_type") or "",
                 pages,
                 preview,

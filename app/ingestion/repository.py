@@ -8,7 +8,7 @@ from typing import Any, Iterable
 from psycopg.rows import dict_row
 
 from db.connection import get_connection
-from ingestion.book_structure import BookChapter, BookStructure, ChapterResolver
+from ingestion.book_structure import BookChapter, BookStructure, BookSubsection, ChapterResolver
 from ingestion.embedding_service import EmbeddingRecord
 
 logger = logging.getLogger(__name__)
@@ -148,11 +148,26 @@ class RagRepository:
         sql = """
         INSERT INTO embeddings_book_chapters(
             document_id, chapter_number, chapter_title, unit_number, unit_title,
-            section_number, section_title, lesson_title, structure_type,
+            section_number, section_title, lesson_title, section_key, structure_type,
             printed_start_page, printed_end_page, pdf_start_page, pdf_end_page,
             detected_by, confidence, metadata
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
-        ON CONFLICT DO NOTHING
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+        ON CONFLICT(document_id, section_key) DO UPDATE SET
+            chapter_number=EXCLUDED.chapter_number,
+            chapter_title=EXCLUDED.chapter_title,
+            unit_number=EXCLUDED.unit_number,
+            unit_title=EXCLUDED.unit_title,
+            section_number=EXCLUDED.section_number,
+            section_title=EXCLUDED.section_title,
+            lesson_title=EXCLUDED.lesson_title,
+            structure_type=EXCLUDED.structure_type,
+            printed_start_page=EXCLUDED.printed_start_page,
+            printed_end_page=EXCLUDED.printed_end_page,
+            pdf_start_page=EXCLUDED.pdf_start_page,
+            pdf_end_page=EXCLUDED.pdf_end_page,
+            detected_by=EXCLUDED.detected_by,
+            confidence=EXCLUDED.confidence,
+            metadata=EXCLUDED.metadata
         """
         params = [
             (
@@ -164,6 +179,7 @@ class RagRepository:
                 c.section_number,
                 c.section_title,
                 c.lesson_title,
+                c.section_key or c.section_number or c.chapter_number or c.display_number or c.display_title,
                 c.structure_type,
                 c.printed_start_page,
                 c.printed_end_page,
@@ -178,6 +194,74 @@ class RagRepository:
         ]
         with get_connection(self.database_url) as conn, conn.transaction():
             conn.execute("DELETE FROM embeddings_book_chapters WHERE document_id=%s", (document_id,))
+            with conn.cursor() as cur:
+                cur.executemany(sql, params)
+
+    def insert_book_subsections(self, document_id: str, subsections: list[BookSubsection]) -> None:
+        """Replace subsection/day/exercise rows for a document.
+
+        These rows are intentionally denormalized with chapter/section fields so
+        callers can fetch exact subsection text and page ranges without joining
+        back through chunks.
+        """
+        with get_connection(self.database_url) as conn, conn.transaction():
+            conn.execute("DELETE FROM embeddings_book_subsections WHERE document_id=%s", (document_id,))
+            if not subsections:
+                return
+            columns = [
+                "document_id", "chapter_number", "chapter_title", "unit_number", "unit_title", "lesson_title",
+                "section_number", "section_title", "subsection_number", "subsection_title", "anchor_marker",
+                "anchor_pdf_page", "anchor_printed_page", "anchor_detection_method", "anchor_raw_heading",
+                "pdf_start_page", "pdf_end_page", "printed_start_page", "printed_end_page", "page_count",
+                "page_numbers", "printed_page_numbers", "included_exercises_or_activities", "includes",
+                "subsection_text", "subsection_text_plain", "text_length_chars", "include_in_embeddings",
+                "embedding_readiness", "text_sources", "quality_flags", "excluded_related_pages", "math_lines", "metadata",
+            ]
+            placeholders = ", ".join("%s::jsonb" if c in {"excluded_related_pages", "metadata"} else "%s" for c in columns)
+            sql = f"""
+                INSERT INTO embeddings_book_subsections({', '.join(columns)})
+                VALUES ({placeholders})
+            """
+            params = []
+            for ss in subsections:
+                params.append(
+                    (
+                        document_id,
+                        ss.chapter_number,
+                        ss.chapter_title,
+                        ss.unit_number,
+                        ss.unit_title,
+                        ss.lesson_title,
+                        ss.section_number,
+                        ss.section_title,
+                        ss.subsection_number,
+                        ss.subsection_title,
+                        ss.anchor_marker,
+                        ss.anchor_pdf_page,
+                        ss.anchor_printed_page,
+                        ss.anchor_detection_method,
+                        ss.anchor_raw_heading,
+                        ss.pdf_start_page,
+                        ss.pdf_end_page,
+                        ss.printed_start_page,
+                        ss.printed_end_page,
+                        ss.page_count,
+                        ss.page_numbers or [],
+                        ss.printed_page_numbers or [],
+                        ss.included_exercises_or_activities or [],
+                        ss.includes or [],
+                        ss.subsection_text,
+                        ss.subsection_text_plain,
+                        ss.text_length_chars,
+                        ss.include_in_embeddings,
+                        ss.embedding_readiness,
+                        ss.text_sources or [],
+                        ss.quality_flags or [],
+                        _json(ss.excluded_related_pages or []),
+                        ss.math_lines or [],
+                        _json(ss.metadata or {}),
+                    )
+                )
             with conn.cursor() as cur:
                 cur.executemany(sql, params)
 
@@ -223,7 +307,7 @@ class RagRepository:
             "document_id", "page_start", "page_end", "chunk_index", "book_title", "school_name", "class_name",
             "subject", "grade", "board", "medium", "language", "detected_language", "chapter_number",
             "chapter_title", "unit_number", "unit_title", "lesson_title",
-            "section_number", "section_title", "subsection_title", "topic", "subtopic", "chunk_type", "content_domain", "difficulty_level",
+            "section_number", "section_title", "subsection_number", "subsection_title", "topic", "subtopic", "chunk_type", "content_domain", "difficulty_level",
             "pedagogical_role", "content", "content_clean", "content_for_embedding", "summary", "keywords", "important_terms",
             "formulas", "numbers", "question_types", "word_count", "token_count", "char_count", "has_formula",
             "has_numbers", "has_questions", "has_exercises", "has_examples", "has_definition", "has_table_like_text",
@@ -295,11 +379,11 @@ class RagRepository:
         INSERT INTO embeddings_raw_text_pages(
             document_id, school_name, class_name, grade, subject, book_title,
             chapter_number, chapter_title, unit_number, unit_title, lesson_title,
-            section_number, section_title, subsection_title, topic, subtopic,
+            section_number, section_title, subsection_number, subsection_title, topic, subtopic,
             page_number, printed_page_number, raw_text, cleaned_text,
             detected_language, word_count, token_count, metadata
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb
         )
         ON CONFLICT(document_id, page_number) DO UPDATE SET
             school_name=EXCLUDED.school_name,
@@ -314,6 +398,7 @@ class RagRepository:
             lesson_title=EXCLUDED.lesson_title,
             section_number=EXCLUDED.section_number,
             section_title=EXCLUDED.section_title,
+            subsection_number=EXCLUDED.subsection_number,
             subsection_title=EXCLUDED.subsection_title,
             topic=EXCLUDED.topic,
             subtopic=EXCLUDED.subtopic,
@@ -355,6 +440,7 @@ class RagRepository:
                     chapter.get("lesson_title"),
                     chapter.get("section_number"),
                     chapter.get("section_title"),
+                    chapter.get("subsection_number"),
                     chapter.get("subsection_title"),
                     chapter.get("topic"),
                     chapter.get("subtopic"),
@@ -416,10 +502,12 @@ class RagRepository:
                d.primary_language, d.content_profile, d.chunking_strategy, d.chunk_max_tokens, d.chunk_overlap_tokens,
                d.document_key, d.file_name, d.file_hash, d.total_pages, d.total_words, d.total_tokens,
                COUNT(DISTINCT c.id)::int AS chunks,
+               COUNT(DISTINCT s.id)::int AS subsections,
                COUNT(DISTINCT v.id)::int AS embeddings
         FROM embeddings_documents d
         LEFT JOIN embeddings_chunks c ON c.document_id=d.id
         LEFT JOIN embeddings_vectors v ON v.document_id=d.id
+        LEFT JOIN embeddings_book_subsections s ON s.document_id=d.id
         WHERE {where}
         GROUP BY d.id
         """
@@ -435,7 +523,7 @@ class RagRepository:
         sql = f"""
         SELECT c.id::text AS chunk_id,
                c.content, c.content_clean, c.book_title, c.school_name, c.class_name, c.subject, c.grade, c.language,
-               c.chapter_title, c.unit_title, c.lesson_title, c.section_title, c.topic, c.chunk_type, c.page_start, c.page_end,
+               c.chapter_title, c.unit_title, c.lesson_title, c.section_title, c.subsection_number, c.subsection_title, c.topic, c.chunk_type, c.page_start, c.page_end,
                c.source_label, c.citation_text,
                GREATEST(0, 1 - (v.embedding <=> %s::vector)) AS vector_score,
                0.0::float AS keyword_score
@@ -458,7 +546,7 @@ class RagRepository:
         sql = f"""
         SELECT c.id::text AS chunk_id,
                c.content, c.content_clean, c.book_title, c.school_name, c.class_name, c.subject, c.grade, c.language,
-               c.chapter_title, c.unit_title, c.lesson_title, c.section_title, c.topic, c.chunk_type, c.page_start, c.page_end,
+               c.chapter_title, c.unit_title, c.lesson_title, c.section_title, c.subsection_number, c.subsection_title, c.topic, c.chunk_type, c.page_start, c.page_end,
                c.source_label, c.citation_text,
                0.0::float AS vector_score,
                ts_rank_cd(c.search_vector, websearch_to_tsquery('simple', %s))::float AS keyword_score
@@ -473,6 +561,279 @@ class RagRepository:
                 cur.execute(sql, params)
                 rows = cur.fetchall()
                 return [dict(r) for r in rows]
+
+    def get_chapter_text(
+        self,
+        *,
+        document_id: str | None = None,
+        document_key: str | None = None,
+        chapter_number: str | None = None,
+        chapter_title: str | None = None,
+        unit_number: str | None = None,
+        unit_title: str | None = None,
+        section_number: str | None = None,
+        section_title: str | None = None,
+    ) -> dict[str, Any]:
+        """Return page-level text for a chapter/section range from raw pages."""
+        clauses, params = self._document_join_filter("p", document_id=document_id, document_key=document_key)
+        self._append_structure_filters(
+            clauses,
+            params,
+            alias="p",
+            chapter_number=chapter_number,
+            chapter_title=chapter_title,
+            unit_number=unit_number,
+            unit_title=unit_title,
+            section_number=section_number,
+            section_title=section_title,
+        )
+        sql = f"""
+        SELECT d.id::text AS document_id,
+               d.document_key,
+               d.book_title,
+               d.school_name,
+               d.class_name,
+               d.subject,
+               d.grade,
+               p.chapter_number,
+               p.chapter_title,
+               p.unit_number,
+               p.unit_title,
+               p.section_number,
+               p.section_title,
+               p.page_number,
+               p.printed_page_number,
+               p.cleaned_text,
+               p.raw_text
+        FROM embeddings_raw_text_pages p
+        JOIN embeddings_documents d ON d.id = p.document_id
+        WHERE {' AND '.join(clauses)}
+        ORDER BY p.page_number
+        """
+        with get_connection(self.database_url) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(sql, params)
+                rows = [dict(r) for r in cur.fetchall()]
+        text_parts = [(r.get("cleaned_text") or r.get("raw_text") or "").strip() for r in rows]
+        text = "\n\n".join(t for t in text_parts if t)
+        return {
+            "document": self._document_from_rows(rows),
+            "filters": {
+                "chapter_number": chapter_number,
+                "chapter_title": chapter_title,
+                "unit_number": unit_number,
+                "unit_title": unit_title,
+                "section_number": section_number,
+                "section_title": section_title,
+            },
+            "page_count": len(rows),
+            "pdf_pages": [r["page_number"] for r in rows],
+            "printed_pages": [r["printed_page_number"] for r in rows if r.get("printed_page_number") is not None],
+            "pages": rows,
+            "text": text,
+        }
+
+    def list_subsections(
+        self,
+        *,
+        document_id: str | None = None,
+        document_key: str | None = None,
+        chapter_number: str | None = None,
+        chapter_title: str | None = None,
+        unit_number: str | None = None,
+        unit_title: str | None = None,
+        section_number: str | None = None,
+        section_title: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses, params = self._document_join_filter("s", document_id=document_id, document_key=document_key)
+        self._append_structure_filters(
+            clauses,
+            params,
+            alias="s",
+            chapter_number=chapter_number,
+            chapter_title=chapter_title,
+            unit_number=unit_number,
+            unit_title=unit_title,
+            section_number=section_number,
+            section_title=section_title,
+        )
+        sql = f"""
+        SELECT d.id::text AS document_id,
+               d.document_key,
+               d.book_title,
+               s.chapter_number,
+               s.chapter_title,
+               s.unit_number,
+               s.unit_title,
+               s.section_number,
+               s.section_title,
+               s.subsection_number,
+               s.subsection_title,
+               s.anchor_marker,
+               s.anchor_pdf_page,
+               s.anchor_printed_page,
+               s.pdf_start_page,
+               s.pdf_end_page,
+               s.printed_start_page,
+               s.printed_end_page,
+               s.page_count,
+               s.page_numbers,
+               s.printed_page_numbers,
+               s.includes,
+               s.included_exercises_or_activities,
+               s.text_length_chars,
+               s.include_in_embeddings,
+               s.embedding_readiness,
+               s.quality_flags
+        FROM embeddings_book_subsections s
+        JOIN embeddings_documents d ON d.id = s.document_id
+        WHERE {' AND '.join(clauses)}
+        ORDER BY COALESCE(s.pdf_start_page, 2147483647), s.section_number, s.subsection_number, s.subsection_title
+        """
+        with get_connection(self.database_url) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(sql, params)
+                return [dict(r) for r in cur.fetchall()]
+
+    def get_subsection_text(
+        self,
+        *,
+        document_id: str | None = None,
+        document_key: str | None = None,
+        chapter_number: str | None = None,
+        chapter_title: str | None = None,
+        unit_number: str | None = None,
+        unit_title: str | None = None,
+        section_number: str | None = None,
+        section_title: str | None = None,
+        subsection_number: str | None = None,
+        subsection_title: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses, params = self._document_join_filter("s", document_id=document_id, document_key=document_key)
+        self._append_structure_filters(
+            clauses,
+            params,
+            alias="s",
+            chapter_number=chapter_number,
+            chapter_title=chapter_title,
+            unit_number=unit_number,
+            unit_title=unit_title,
+            section_number=section_number,
+            section_title=section_title,
+            subsection_number=subsection_number,
+            subsection_title=subsection_title,
+        )
+        sql = f"""
+        SELECT d.id::text AS document_id,
+               d.document_key,
+               d.book_title,
+               d.school_name,
+               d.class_name,
+               d.subject,
+               d.grade,
+               s.chapter_number,
+               s.chapter_title,
+               s.unit_number,
+               s.unit_title,
+               s.section_number,
+               s.section_title,
+               s.subsection_number,
+               s.subsection_title,
+               s.anchor_marker,
+               s.anchor_pdf_page,
+               s.anchor_printed_page,
+               s.anchor_detection_method,
+               s.anchor_raw_heading,
+               s.pdf_start_page,
+               s.pdf_end_page,
+               s.printed_start_page,
+               s.printed_end_page,
+               s.page_count,
+               s.page_numbers,
+               s.printed_page_numbers,
+               s.includes,
+               s.included_exercises_or_activities,
+               s.text_sources,
+               s.quality_flags,
+               s.excluded_related_pages,
+               s.math_lines,
+               s.include_in_embeddings,
+               s.embedding_readiness,
+               s.subsection_text,
+               s.subsection_text_plain,
+               s.metadata
+        FROM embeddings_book_subsections s
+        JOIN embeddings_documents d ON d.id = s.document_id
+        WHERE {' AND '.join(clauses)}
+        ORDER BY COALESCE(s.pdf_start_page, 2147483647), s.section_number, s.subsection_number, s.subsection_title
+        """
+        with get_connection(self.database_url) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(sql, params)
+                return [dict(r) for r in cur.fetchall()]
+
+    def _document_join_filter(self, alias: str, *, document_id: str | None, document_key: str | None) -> tuple[list[str], list[Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if document_id:
+            clauses.append(f"{alias}.document_id = %s")
+            params.append(document_id)
+        if document_key:
+            clauses.append("d.document_key = %s")
+            params.append(document_key)
+        if not clauses:
+            raise ValueError("Provide document_id or document_key.")
+        return clauses, params
+
+    def _append_structure_filters(
+        self,
+        clauses: list[str],
+        params: list[Any],
+        *,
+        alias: str,
+        chapter_number: str | None = None,
+        chapter_title: str | None = None,
+        unit_number: str | None = None,
+        unit_title: str | None = None,
+        section_number: str | None = None,
+        section_title: str | None = None,
+        subsection_number: str | None = None,
+        subsection_title: str | None = None,
+    ) -> None:
+        exact = {
+            "chapter_number": chapter_number,
+            "unit_number": unit_number,
+            "section_number": section_number,
+            "subsection_number": subsection_number,
+        }
+        fuzzy = {
+            "chapter_title": chapter_title,
+            "unit_title": unit_title,
+            "section_title": section_title,
+            "subsection_title": subsection_title,
+        }
+        for field, value in exact.items():
+            if value:
+                clauses.append(f"{alias}.{field} = %s")
+                params.append(value)
+        for field, value in fuzzy.items():
+            if value:
+                clauses.append(f"{alias}.{field} ILIKE %s")
+                params.append(f"%{value}%")
+
+    def _document_from_rows(self, rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if not rows:
+            return None
+        row = rows[0]
+        return {
+            "document_id": row.get("document_id"),
+            "document_key": row.get("document_key"),
+            "book_title": row.get("book_title"),
+            "school_name": row.get("school_name"),
+            "class_name": row.get("class_name"),
+            "subject": row.get("subject"),
+            "grade": row.get("grade"),
+        }
 
     def _build_filter_sql(self, filters: dict[str, Any], table_alias: str = "c") -> tuple[str, list[Any]]:
         clauses: list[str] = []
@@ -492,5 +853,8 @@ class RagRepository:
         if filters.get("section_title"):
             clauses.append(f"{table_alias}.section_title ILIKE %s")
             params.append(f"%{filters['section_title']}%")
+        if filters.get("subsection_title"):
+            clauses.append(f"{table_alias}.subsection_title ILIKE %s")
+            params.append(f"%{filters['subsection_title']}%")
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
         return where, params

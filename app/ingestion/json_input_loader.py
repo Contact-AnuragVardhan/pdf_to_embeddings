@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ingestion.book_structure import BookChapter, BookStructure, normalize_chapters
+from ingestion.book_structure import BookChapter, BookStructure, BookSubsection, normalize_chapters
 from ingestion.language_detector import LanguageDetector
 from ingestion.pdf_extractor import ExtractedPage
 from ingestion.structure_detector import StructureDetector
@@ -137,6 +137,44 @@ def _page_range(start: int | None, end: int | None, fallback_page: int | None = 
     return list(range(start, end + 1))
 
 
+def _as_text_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(x).strip() for x in value if str(x).strip()]
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _as_int_list(value: Any) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    out: list[int] = []
+    for item in value:
+        parsed = _int_or_none(item)
+        if parsed is not None:
+            out.append(parsed)
+    return out
+
+
+def _dict_int_value(raw: dict[str, Any], dict_key: str, child_key: str) -> int | None:
+    nested = _as_dict(raw.get(dict_key))
+    return _int_or_none(nested.get(child_key))
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes", "y"}:
+        return True
+    if text in {"false", "0", "no", "n"}:
+        return False
+    return None
+
+
 def _text_fields(raw: dict[str, Any]) -> str | None:
     return _first_text(
         raw,
@@ -261,9 +299,20 @@ class JsonExtractionInputLoader:
 
     def _build_book_structure(self, extraction: dict[str, Any], metadata: dict[str, Any]) -> BookStructure:
         chapters: list[BookChapter] = []
-        chapters.extend(self._chapter_records(_as_list(extraction.get("chapters"))))
-        chapters.extend(self._section_records(_as_list(extraction.get("sections"))))
-        chapters.extend(self._section_records(_as_list(extraction.get("content_units"))))
+        section_index = _as_list(extraction.get("section_index"))
+        if section_index:
+            # Production JSONs such as English Poorvi and Maths R.S. Aggarwal store
+            # the verified parent structures in extraction.section_index. Treat this
+            # as authoritative and do not also ingest broad extraction.chapters rows.
+            # Poorvi: 16 section/lesson rows under 5 Units.
+            # Maths: 25 chapter rows, including Answers.
+            chapters.extend(self._section_records(section_index))
+        else:
+            chapters.extend(self._chapter_records(_as_list(extraction.get("chapters"))))
+            chapters.extend(self._section_records(_as_list(extraction.get("sections"))))
+            chapters.extend(self._section_records(_as_list(extraction.get("content_units"))))
+
+        subsections = self._subsection_records(extraction)
 
         languages = extraction.get("languages_detected") or metadata.get("languages_detected") or []
         if isinstance(languages, str):
@@ -288,6 +337,7 @@ class JsonExtractionInputLoader:
             confidence=_float_or_none(extraction.get("confidence") or metadata.get("llm_metadata_confidence")) or 1.0,
             detected_by="json_input",
             chapters=normalize_chapters(chapters),
+            subsections=subsections,
             metadata={"source": "json_input"},
         )
 
@@ -320,12 +370,12 @@ class JsonExtractionInputLoader:
                         BookChapter(
                             chapter_number=chapter_number,
                             chapter_title=chapter_title,
-                            unit_number=_clean_text_value(raw.get("unit_number") or child_raw.get("unit_number")),
-                            unit_title=_clean_text_value(raw.get("unit_title") or child_raw.get("unit_title")),
+                            unit_number=_clean_text_value(child_raw.get("unit_number") or raw.get("unit_number")),
+                            unit_title=_clean_text_value(child_raw.get("unit_title") or raw.get("unit_title")),
                             section_number=_clean_text_value(child_raw.get("section_number") or child_raw.get("number") or child_index),
                             section_title=section_title,
                             lesson_title=_clean_text_value(child_raw.get("lesson_title")),
-                            structure_type="section" if section_title else "chapter",
+                            structure_type=_clean_text_value(child_raw.get("chapter_type") or child_raw.get("structure_type") or raw.get("chapter_type") or raw.get("structure_type")) or ("section" if section_title else "chapter"),
                             printed_start_page=_int_or_none(child_raw.get("printed_start_page") or child_raw.get("start_printed_page")),
                             printed_end_page=_int_or_none(child_raw.get("printed_end_page") or child_raw.get("end_printed_page")),
                             pdf_start_page=_int_or_none(child_raw.get("start_page") or child_raw.get("pdf_start_page")),
@@ -348,7 +398,7 @@ class JsonExtractionInputLoader:
                     section_number=_clean_text_value(raw.get("section_number")),
                     section_title=_clean_text_value(raw.get("section_title")),
                     lesson_title=_clean_text_value(raw.get("lesson_title")),
-                    structure_type=_clean_text_value(raw.get("structure_type")) or "chapter",
+                    structure_type=_clean_text_value(raw.get("chapter_type") or raw.get("structure_type")) or "chapter",
                     printed_start_page=_int_or_none(raw.get("printed_start_page") or raw.get("start_printed_page")),
                     printed_end_page=_int_or_none(raw.get("printed_end_page") or raw.get("end_printed_page")),
                     pdf_start_page=_int_or_none(raw.get("start_page") or raw.get("pdf_start_page")),
@@ -384,12 +434,12 @@ class JsonExtractionInputLoader:
                         BookChapter(
                             chapter_number=_clean_text_value(lesson_raw.get("chapter_number") or raw.get("chapter_number")),
                             chapter_title=_clean_text_value(lesson_raw.get("chapter_title") or raw.get("chapter_title")),
-                            unit_number=_clean_text_value(lesson_raw.get("unit_number") or raw.get("unit_number") or raw.get("chapter_number")),
-                            unit_title=_clean_text_value(lesson_raw.get("unit_title") or raw.get("unit_title") or raw.get("chapter_title")),
+                            unit_number=_clean_text_value(lesson_raw.get("unit_number") or raw.get("unit_number")),
+                            unit_title=_clean_text_value(lesson_raw.get("unit_title") or raw.get("unit_title")),
                             section_number=_clean_text_value(lesson_raw.get("section_number") or lesson_index),
                             section_title=title,
                             lesson_title=_clean_text_value(lesson_raw.get("lesson_title")),
-                            structure_type=_clean_text_value(lesson_raw.get("structure_type") or lesson_raw.get("lesson_type")) or "section",
+                            structure_type=_clean_text_value(lesson_raw.get("chapter_type") or lesson_raw.get("structure_type") or lesson_raw.get("lesson_type") or raw.get("chapter_type") or raw.get("structure_type")) or "section",
                             printed_start_page=_int_or_none(lesson_raw.get("printed_start_page") or lesson_raw.get("start_printed_page")),
                             printed_end_page=_int_or_none(lesson_raw.get("printed_end_page") or lesson_raw.get("end_printed_page")),
                             pdf_start_page=_int_or_none(lesson_raw.get("start_page") or lesson_raw.get("pdf_start_page")),
@@ -408,12 +458,12 @@ class JsonExtractionInputLoader:
                 BookChapter(
                     chapter_number=_clean_text_value(raw.get("chapter_number")),
                     chapter_title=_clean_text_value(raw.get("chapter_title")),
-                    unit_number=_clean_text_value(raw.get("unit_number") or raw.get("chapter_number")),
-                    unit_title=_clean_text_value(raw.get("unit_title") or raw.get("chapter_title")),
+                    unit_number=_clean_text_value(raw.get("unit_number")),
+                    unit_title=_clean_text_value(raw.get("unit_title")),
                     section_number=_clean_text_value(raw.get("section_number") or group_index),
                     section_title=title,
                     lesson_title=_clean_text_value(raw.get("lesson_title")),
-                    structure_type=_clean_text_value(raw.get("structure_type") or raw.get("lesson_type")) or "section",
+                    structure_type=_clean_text_value(raw.get("chapter_type") or raw.get("structure_type") or raw.get("lesson_type")) or "section",
                     printed_start_page=_int_or_none(raw.get("printed_start_page") or raw.get("start_printed_page")),
                     printed_end_page=_int_or_none(raw.get("printed_end_page") or raw.get("end_printed_page")),
                     pdf_start_page=_int_or_none(raw.get("start_page") or raw.get("pdf_start_page")),
@@ -424,6 +474,218 @@ class JsonExtractionInputLoader:
                 )
             )
         return records
+
+    def _subsection_records(self, extraction: dict[str, Any]) -> list[BookSubsection]:
+        """Extract production subsection/day/exercise ranges from supported JSON shapes.
+
+        Preferred source is extraction.section_index[*].subsections because both
+        attached production JSONs expose verified parent ranges there. If that is
+        absent, fall back to recursively scanning chapters/lessons/sections.
+        """
+        records: list[BookSubsection] = []
+        section_index = _as_list(extraction.get("section_index"))
+        if section_index:
+            for parent in section_index:
+                parent_raw = _as_dict(parent)
+                records.extend(self._subsections_for_parent(parent_raw, _as_list(parent_raw.get("subsections"))))
+        else:
+            for key in ("chapters", "sections", "content_units"):
+                for item in _as_list(extraction.get(key)):
+                    records.extend(self._collect_subsections_recursive(_as_dict(item), {}))
+        return self._dedupe_subsections(records)
+
+    def _collect_subsections_recursive(self, raw: dict[str, Any], inherited: dict[str, Any]) -> list[BookSubsection]:
+        if not raw:
+            return []
+        current = dict(inherited)
+        for key in (
+            "chapter_number", "chapter_title", "unit_number", "unit_title",
+            "section_number", "section_title", "lesson_title",
+        ):
+            if raw.get(key) is not None:
+                current[key] = raw.get(key)
+        # Common parent aliases.
+        if raw.get("number") is not None and not current.get("chapter_number") and raw.get("chapter_title"):
+            current["chapter_number"] = raw.get("number")
+        if raw.get("title") is not None:
+            if raw.get("chapter_type") == "chapter" and not current.get("chapter_title"):
+                current["chapter_title"] = raw.get("title")
+            elif not current.get("section_title"):
+                current["section_title"] = raw.get("title")
+
+        records = self._subsections_for_parent(current, _as_list(raw.get("subsections")))
+        for child_key in ("lessons", "sections", "chapters", "content_units"):
+            for child in _as_list(raw.get(child_key)):
+                records.extend(self._collect_subsections_recursive(_as_dict(child), current))
+        return records
+
+    def _subsections_for_parent(self, parent_raw: dict[str, Any], items: list[Any]) -> list[BookSubsection]:
+        records: list[BookSubsection] = []
+        parent_context_keys = {
+            "chapter_number",
+            "chapter_title",
+            "chapter_type",
+            "unit_number",
+            "unit_title",
+            "section_number",
+            "section_title",
+            "lesson_title",
+        }
+        parent_context = {
+            key: value
+            for key, value in parent_raw.items()
+            if key in parent_context_keys and value is not None
+        }
+        for index, item in enumerate(items, start=1):
+            raw = _as_dict(item)
+            if not raw:
+                continue
+            merged = dict(parent_context)
+            merged.update(raw)
+            record = self._subsection_record(merged, index=index)
+            if record:
+                records.append(record)
+        return records
+
+    def _subsection_record(self, raw: dict[str, Any], *, index: int) -> BookSubsection | None:
+        title = _clean_text_value(raw.get("subsection_title") or raw.get("title") or raw.get("anchor_marker") or raw.get("anchor_raw_heading"))
+        number = _clean_text_value(raw.get("subsection_number") or raw.get("number") or index)
+        if not (title or number):
+            return None
+
+        start = (
+            _int_or_none(raw.get("start_page"))
+            or _int_or_none(raw.get("start_pdf_page"))
+            or _int_or_none(raw.get("pdf_start_page"))
+            or _dict_int_value(raw, "pdf_pages", "start")
+        )
+        end = (
+            _int_or_none(raw.get("end_page"))
+            or _int_or_none(raw.get("end_pdf_page"))
+            or _int_or_none(raw.get("pdf_end_page"))
+            or _dict_int_value(raw, "pdf_pages", "end")
+            or start
+        )
+        printed_start = (
+            _int_or_none(raw.get("printed_start_page"))
+            or _int_or_none(raw.get("start_printed_page"))
+            or _dict_int_value(raw, "printed_pages", "start")
+        )
+        printed_end = (
+            _int_or_none(raw.get("printed_end_page"))
+            or _int_or_none(raw.get("end_printed_page"))
+            or _dict_int_value(raw, "printed_pages", "end")
+            or printed_start
+        )
+        page_numbers = (
+            _as_int_list(raw.get("production_indexed_page_numbers"))
+            or _as_int_list(raw.get("page_numbers"))
+            or _page_range(start, end)
+        )
+        printed_page_numbers = (
+            _as_int_list(raw.get("production_printed_page_numbers"))
+            or _as_int_list(raw.get("printed_page_numbers"))
+            or _page_range(printed_start, printed_end)
+        )
+
+        text = _first_text(raw, "production_subsection_text", "subsection_text", "subsection_text_plain", "text_plain", "text", "content")
+        text_plain = _first_text(raw, "subsection_text_plain", "text_plain", "production_subsection_text", "subsection_text", "text", "content")
+        include_in_embeddings = _bool_or_none(raw.get("include_in_embeddings"))
+        if include_in_embeddings is None:
+            include_in_embeddings = True
+        text_length = _int_or_none(raw.get("text_length_chars"))
+        if text_length is None and text:
+            text_length = len(text)
+
+        metadata = self._extra_subsection_metadata(raw)
+        metadata["source"] = "json_input"
+        metadata["source_kind"] = "subsection"
+
+        return BookSubsection(
+            chapter_number=_clean_text_value(raw.get("chapter_number")),
+            chapter_title=_clean_text_value(raw.get("chapter_title")),
+            unit_number=_clean_text_value(raw.get("unit_number")),
+            unit_title=_clean_text_value(raw.get("unit_title")),
+            section_number=_clean_text_value(raw.get("section_number")),
+            section_title=_clean_text_value(raw.get("section_title")),
+            lesson_title=_clean_text_value(raw.get("lesson_title")),
+            subsection_number=number,
+            subsection_title=title,
+            anchor_marker=_clean_text_value(raw.get("anchor_marker")),
+            anchor_pdf_page=_int_or_none(raw.get("anchor_pdf_page")),
+            anchor_printed_page=_int_or_none(raw.get("anchor_printed_page")),
+            anchor_detection_method=_clean_text_value(raw.get("anchor_detection_method")),
+            anchor_raw_heading=_clean_text_value(raw.get("anchor_raw_heading")),
+            included_exercises_or_activities=_as_text_list(raw.get("included_exercises_or_activities")),
+            includes=_as_text_list(raw.get("includes")),
+            pdf_start_page=start,
+            pdf_end_page=end,
+            printed_start_page=printed_start,
+            printed_end_page=printed_end,
+            page_numbers=page_numbers,
+            printed_page_numbers=printed_page_numbers,
+            page_count=_int_or_none(raw.get("production_page_count") or raw.get("page_count")) or (len(page_numbers) if page_numbers else None),
+            subsection_text=text,
+            subsection_text_plain=text_plain,
+            text_length_chars=text_length,
+            include_in_embeddings=include_in_embeddings,
+            embedding_readiness=_clean_text_value(raw.get("embedding_readiness")),
+            text_sources=_as_text_list(raw.get("text_sources")),
+            quality_flags=_as_text_list(raw.get("quality_flags")),
+            excluded_related_pages=_as_list(raw.get("production_excluded_pages")) or _as_list(raw.get("excluded_related_pages")),
+            math_lines=_as_text_list(raw.get("subsection_math_lines")) or _as_text_list(raw.get("math_lines")),
+            metadata=metadata,
+        )
+
+    def _dedupe_subsections(self, records: list[BookSubsection]) -> list[BookSubsection]:
+        unique: dict[tuple[Any, ...], BookSubsection] = {}
+        for record in records:
+            key = (
+                record.chapter_number or "",
+                record.chapter_title or "",
+                record.section_number or "",
+                record.section_title or "",
+                record.subsection_number or "",
+                record.subsection_title or "",
+                record.pdf_start_page or -1,
+                record.pdf_end_page or -1,
+            )
+            existing = unique.get(key)
+            if not existing:
+                unique[key] = record
+                continue
+            # Keep the richer copy if duplicates are discovered in multiple JSON branches.
+            old_len = len(existing.subsection_text or "")
+            new_len = len(record.subsection_text or "")
+            if new_len > old_len:
+                unique[key] = record
+        return sorted(
+            unique.values(),
+            key=lambda r: (
+                r.pdf_start_page if r.pdf_start_page is not None else 10**9,
+                r.section_number or "",
+                r.subsection_number or "",
+                r.subsection_title or "",
+            ),
+        )
+
+    def _extra_subsection_metadata(self, raw: dict[str, Any]) -> dict[str, Any]:
+        ignored = {
+            "chapter_number", "chapter_title", "unit_number", "unit_title", "section_number", "section_title",
+            "lesson_title", "subsection_number", "subsection_title", "number", "title", "anchor_marker",
+            "anchor_pdf_page", "anchor_printed_page", "anchor_detection_method", "anchor_raw_heading",
+            "included_exercises_or_activities", "includes", "start_page", "end_page", "start_pdf_page",
+            "end_pdf_page", "pdf_start_page", "pdf_end_page", "pdf_pages", "printed_start_page",
+            "printed_end_page", "start_printed_page", "end_printed_page", "printed_pages", "page_count",
+            "production_page_count", "subsection_text", "subsection_text_plain", "text_plain",
+            "production_subsection_text", "text", "content", "production_indexed_page_numbers",
+            "production_printed_page_numbers", "page_numbers", "printed_page_numbers", "production_excluded_pages",
+            "excluded_related_pages", "subsection_math_lines", "math_lines", "text_sources", "quality_flags",
+            "include_in_embeddings", "embedding_readiness", "text_length_chars",
+            "subsections", "lessons", "sections", "chapters", "content_units",
+            "lesson_text", "chapter_text", "section_text", "production_lesson_text",
+        }
+        return {k: v for k, v in raw.items() if k not in ignored}
 
     def _extra_structure_metadata(self, raw: dict[str, Any]) -> dict[str, Any]:
         ignored = {
@@ -449,15 +711,27 @@ class JsonExtractionInputLoader:
             "lesson_text",
             "chapter_text",
             "section_text",
+            "subsection_text",
+            "subsection_text_plain",
+            "production_lesson_text",
+            "production_subsection_text",
+            "text_plain",
             "text",
             "content",
             "cleaned_text",
             "raw_text",
+            "production_indexed_page_numbers",
+            "production_printed_page_numbers",
+            "production_excluded_pages",
+            "production_page_count",
+            "math_lines",
+            "subsection_math_lines",
             "lessons",
             "sections",
             "pages",
             "page_texts",
             "confidence",
+            "subsections",
         }
         metadata = {k: v for k, v in raw.items() if k not in ignored}
         metadata["source"] = "json_input"
@@ -487,6 +761,8 @@ class JsonExtractionInputLoader:
         for item in _as_list(extraction.get("sections")):
             self._collect_text_from_section_group(_as_dict(item), page_texts, page_metadata)
         for item in _as_list(extraction.get("content_units")):
+            self._collect_text_from_section_group(_as_dict(item), page_texts, page_metadata)
+        for item in _as_list(extraction.get("section_index")):
             self._collect_text_from_section_group(_as_dict(item), page_texts, page_metadata)
 
         pages: list[ExtractedPage] = []
@@ -562,7 +838,7 @@ class JsonExtractionInputLoader:
                 if page_number is not None and text:
                     self._append_page_text(page_texts, page_metadata, page_number, text, page_raw)
 
-        lessons = _as_list(raw.get("lessons")) or _as_list(raw.get("sections"))
+        lessons = _as_list(raw.get("lessons")) or _as_list(raw.get("sections")) or _as_list(raw.get("subsections"))
         if lessons:
             for lesson in lessons:
                 lesson_raw = _as_dict(lesson)
@@ -603,6 +879,8 @@ class JsonExtractionInputLoader:
                 "section_number": raw.get("section_number"),
                 "section_title": raw.get("section_title") or title,
                 "lesson_title": raw.get("lesson_title"),
+                "subsection_number": raw.get("subsection_number"),
+                "subsection_title": raw.get("subsection_title"),
                 "structure_type": raw.get("structure_type") or raw.get("lesson_type") or "section",
                 "synthetic_page_from_json_range": True,
             },
