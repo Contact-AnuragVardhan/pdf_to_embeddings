@@ -10,3 +10,6 @@ python app/main.py ingest-json --json "json_input/English_Poorvi_production_read
 validate:
 python validation_script/validate_english_poorvi_db.py --json "json_input/English_Poorvi_production_ready.json"
 python validation_script/validate_english_poorvi_db.py --json "json_input/English_Poorvi_production_ready.json" --db
+
+
+python app/main.py ingest-json --json "json_input/Grade10_Physics_production_ready.json" --reindex
