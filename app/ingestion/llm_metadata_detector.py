@@ -8,7 +8,7 @@ from typing import Any
 from openai import OpenAI
 
 from config import Settings
-from ingestion.book_structure import BookChapter, BookStructure, enrich_chapter_page_ranges, structure_from_llm_json
+from ingestion.book_structure import BookChapter, BookStructure, enrich_chapter_page_ranges, structure_from_llm_json, _int_or_none
 from ingestion.pdf_extractor import ExtractedPage
 
 logger = logging.getLogger(__name__)
@@ -156,7 +156,7 @@ class LLMMetadataDetector:
     def _fallback_toc_is_reliable(self, chapters: list[BookChapter]) -> bool:
         if not chapters or len(chapters) < 5:
             return False
-        printed = [c.printed_start_page for c in chapters if c.printed_start_page is not None]
+        printed = [_int_or_none(c.printed_start_page) for c in chapters if _int_or_none(c.printed_start_page) is not None]
         if len(printed) < max(5, int(len(chapters) * 0.70)):
             return False
         increasing_pairs = sum(1 for a, b in zip(printed, printed[1:]) if b > a)
@@ -218,7 +218,7 @@ class LLMMetadataDetector:
                         {
                             "chapter_number": "string|null",
                             "chapter_title": "string",
-                            "printed_start_page": "integer|null",
+                            "printed_start_page": "string|null",
                             "pdf_start_page": "integer|null",
                             "confidence": "number 0 to 1"
                         }
@@ -229,7 +229,7 @@ class LLMMetadataDetector:
                             "unit_title": "string|null",
                             "section_number": "string|null",
                             "section_title": "string",
-                            "printed_start_page": "integer|null",
+                            "printed_start_page": "string|null",
                             "pdf_start_page": "integer|null",
                             "confidence": "number 0 to 1"
                         }
@@ -447,7 +447,7 @@ class RuleBasedStructureDetector:
                     section_number=str(section_index_in_unit),
                     section_title=title,
                     structure_type="section",
-                    printed_start_page=printed_page,
+                    printed_start_page=str(printed_page),
                     detected_by="rule_based_unit_section_toc",
                     confidence=0.82,
                     metadata={
@@ -538,7 +538,7 @@ class RuleBasedStructureDetector:
                     section_number=str(section_number),
                     section_title=title,
                     structure_type="section",
-                    printed_start_page=printed_page,
+                    printed_start_page=str(printed_page),
                     detected_by="rule_based_unit_section_toc_repaired",
                     confidence=0.90,
                     metadata={
@@ -564,7 +564,7 @@ class RuleBasedStructureDetector:
             for item in items:
                 if (
                     str(item.unit_number or "") == "5"
-                    and item.printed_start_page == 151
+                    and _int_or_none(item.printed_start_page) == 151
                     and item.section_title
                     and "embroidering dreams" in item.section_title.lower()
                     and "ila sachani" not in item.section_title.lower()
@@ -655,7 +655,7 @@ class RuleBasedStructureDetector:
                 BookChapter(
                     chapter_number=str(index),
                     chapter_title=title,
-                    printed_start_page=page_numbers[index - 1] if index - 1 < len(page_numbers) else None,
+                    printed_start_page=str(page_numbers[index - 1]) if index - 1 < len(page_numbers) else None,
                     detected_by="rule_based_split_column_toc",
                     confidence=0.62,
                 )
@@ -715,7 +715,7 @@ class RuleBasedStructureDetector:
         return BookChapter(
             chapter_number=match.group("num"),
             chapter_title=title,
-            printed_start_page=printed_page,
+            printed_start_page=str(printed_page),
             detected_by="rule_based_toc",
             confidence=0.55,
         )

@@ -13,3 +13,5 @@ python validation_script/validate_english_poorvi_db.py --json "json_input/Englis
 
 
 python app/main.py ingest-json --json "json_input/Grade10_Physics_production_ready.json" --reindex
+
+python app/main.py ingest-json --json "json_input/Grade10_Maths_production_ready.json" --reindex

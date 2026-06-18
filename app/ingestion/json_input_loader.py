@@ -162,6 +162,32 @@ def _dict_int_value(raw: dict[str, Any], dict_key: str, child_key: str) -> int |
     return _int_or_none(nested.get(child_key))
 
 
+def _text_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _dict_text_value(raw: dict[str, Any], dict_key: str, child_key: str) -> str | None:
+    nested = _as_dict(raw.get(dict_key))
+    return _text_or_none(nested.get(child_key))
+
+
+def _page_label_range(start: str | None, end: str | None) -> list[str]:
+    if start is None:
+        return []
+    if end is None:
+        end = start
+    start_int = _int_or_none(start)
+    end_int = _int_or_none(end)
+    if start_int is not None and end_int is not None and end_int >= start_int:
+        return [str(n) for n in range(start_int, end_int + 1)]
+    if end == start:
+        return [start]
+    return [start, end]
+
+
 def _bool_or_none(value: Any) -> bool | None:
     if value is None:
         return None
@@ -376,8 +402,8 @@ class JsonExtractionInputLoader:
                             section_title=section_title,
                             lesson_title=_clean_text_value(child_raw.get("lesson_title")),
                             structure_type=_clean_text_value(child_raw.get("chapter_type") or child_raw.get("structure_type") or raw.get("chapter_type") or raw.get("structure_type")) or ("section" if section_title else "chapter"),
-                            printed_start_page=_int_or_none(child_raw.get("printed_start_page") or child_raw.get("start_printed_page")),
-                            printed_end_page=_int_or_none(child_raw.get("printed_end_page") or child_raw.get("end_printed_page")),
+                            printed_start_page=_text_or_none(child_raw.get("printed_start_page") or child_raw.get("start_printed_page")),
+                            printed_end_page=_text_or_none(child_raw.get("printed_end_page") or child_raw.get("end_printed_page")),
                             pdf_start_page=_int_or_none(child_raw.get("start_page") or child_raw.get("pdf_start_page")),
                             pdf_end_page=_int_or_none(child_raw.get("end_page") or child_raw.get("pdf_end_page")),
                             confidence=_float_or_none(child_raw.get("confidence") or raw.get("confidence")) or 1.0,
@@ -399,8 +425,8 @@ class JsonExtractionInputLoader:
                     section_title=_clean_text_value(raw.get("section_title")),
                     lesson_title=_clean_text_value(raw.get("lesson_title")),
                     structure_type=_clean_text_value(raw.get("chapter_type") or raw.get("structure_type")) or "chapter",
-                    printed_start_page=_int_or_none(raw.get("printed_start_page") or raw.get("start_printed_page")),
-                    printed_end_page=_int_or_none(raw.get("printed_end_page") or raw.get("end_printed_page")),
+                    printed_start_page=_text_or_none(raw.get("printed_start_page") or raw.get("start_printed_page")),
+                    printed_end_page=_text_or_none(raw.get("printed_end_page") or raw.get("end_printed_page")),
                     pdf_start_page=_int_or_none(raw.get("start_page") or raw.get("pdf_start_page")),
                     pdf_end_page=_int_or_none(raw.get("end_page") or raw.get("pdf_end_page")),
                     confidence=_float_or_none(raw.get("confidence")) or 1.0,
@@ -440,8 +466,8 @@ class JsonExtractionInputLoader:
                             section_title=title,
                             lesson_title=_clean_text_value(lesson_raw.get("lesson_title")),
                             structure_type=_clean_text_value(lesson_raw.get("chapter_type") or lesson_raw.get("structure_type") or lesson_raw.get("lesson_type") or raw.get("chapter_type") or raw.get("structure_type")) or "section",
-                            printed_start_page=_int_or_none(lesson_raw.get("printed_start_page") or lesson_raw.get("start_printed_page")),
-                            printed_end_page=_int_or_none(lesson_raw.get("printed_end_page") or lesson_raw.get("end_printed_page")),
+                            printed_start_page=_text_or_none(lesson_raw.get("printed_start_page") or lesson_raw.get("start_printed_page")),
+                            printed_end_page=_text_or_none(lesson_raw.get("printed_end_page") or lesson_raw.get("end_printed_page")),
                             pdf_start_page=_int_or_none(lesson_raw.get("start_page") or lesson_raw.get("pdf_start_page")),
                             pdf_end_page=_int_or_none(lesson_raw.get("end_page") or lesson_raw.get("pdf_end_page")),
                             confidence=_float_or_none(lesson_raw.get("confidence") or raw.get("confidence")) or 1.0,
@@ -464,8 +490,8 @@ class JsonExtractionInputLoader:
                     section_title=title,
                     lesson_title=_clean_text_value(raw.get("lesson_title")),
                     structure_type=_clean_text_value(raw.get("chapter_type") or raw.get("structure_type") or raw.get("lesson_type")) or "section",
-                    printed_start_page=_int_or_none(raw.get("printed_start_page") or raw.get("start_printed_page")),
-                    printed_end_page=_int_or_none(raw.get("printed_end_page") or raw.get("end_printed_page")),
+                    printed_start_page=_text_or_none(raw.get("printed_start_page") or raw.get("start_printed_page")),
+                    printed_end_page=_text_or_none(raw.get("printed_end_page") or raw.get("end_printed_page")),
                     pdf_start_page=_int_or_none(raw.get("start_page") or raw.get("pdf_start_page")),
                     pdf_end_page=_int_or_none(raw.get("end_page") or raw.get("pdf_end_page")),
                     confidence=_float_or_none(raw.get("confidence")) or 1.0,
@@ -567,14 +593,14 @@ class JsonExtractionInputLoader:
             or start
         )
         printed_start = (
-            _int_or_none(raw.get("printed_start_page"))
-            or _int_or_none(raw.get("start_printed_page"))
-            or _dict_int_value(raw, "printed_pages", "start")
+            _text_or_none(raw.get("printed_start_page"))
+            or _text_or_none(raw.get("start_printed_page"))
+            or _dict_text_value(raw, "printed_pages", "start")
         )
         printed_end = (
-            _int_or_none(raw.get("printed_end_page"))
-            or _int_or_none(raw.get("end_printed_page"))
-            or _dict_int_value(raw, "printed_pages", "end")
+            _text_or_none(raw.get("printed_end_page"))
+            or _text_or_none(raw.get("end_printed_page"))
+            or _dict_text_value(raw, "printed_pages", "end")
             or printed_start
         )
         page_numbers = (
@@ -583,9 +609,9 @@ class JsonExtractionInputLoader:
             or _page_range(start, end)
         )
         printed_page_numbers = (
-            _as_int_list(raw.get("production_printed_page_numbers"))
-            or _as_int_list(raw.get("printed_page_numbers"))
-            or _page_range(printed_start, printed_end)
+            _as_text_list(raw.get("production_printed_page_numbers"))
+            or _as_text_list(raw.get("printed_page_numbers"))
+            or _page_label_range(printed_start, printed_end)
         )
 
         text = _first_text(raw, "production_subsection_text", "subsection_text", "subsection_text_plain", "text_plain", "text", "content")
@@ -613,7 +639,7 @@ class JsonExtractionInputLoader:
             subsection_title=title,
             anchor_marker=_clean_text_value(raw.get("anchor_marker")),
             anchor_pdf_page=_int_or_none(raw.get("anchor_pdf_page")),
-            anchor_printed_page=_int_or_none(raw.get("anchor_printed_page")),
+            anchor_printed_page=_text_or_none(raw.get("anchor_printed_page")),
             anchor_detection_method=_clean_text_value(raw.get("anchor_detection_method")),
             anchor_raw_heading=_clean_text_value(raw.get("anchor_raw_heading")),
             included_exercises_or_activities=_as_text_list(raw.get("included_exercises_or_activities")),

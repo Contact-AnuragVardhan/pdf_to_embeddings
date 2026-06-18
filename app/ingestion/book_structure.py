@@ -28,8 +28,8 @@ class BookChapter:
     # chapter number; for unit/section books such as Poorvi this is section_number.
     section_key: str | None = None
     structure_type: str = "chapter"  # chapter | section | unit | lesson | answers
-    printed_start_page: int | None = None
-    printed_end_page: int | None = None
+    printed_start_page: str | None = None
+    printed_end_page: str | None = None
     pdf_start_page: int | None = None
     pdf_end_page: int | None = None
     confidence: float | None = None
@@ -98,17 +98,17 @@ class BookSubsection:
     subsection_title: str | None = None
     anchor_marker: str | None = None
     anchor_pdf_page: int | None = None
-    anchor_printed_page: int | None = None
+    anchor_printed_page: str | None = None
     anchor_detection_method: str | None = None
     anchor_raw_heading: str | None = None
     included_exercises_or_activities: list[str] = field(default_factory=list)
     includes: list[str] = field(default_factory=list)
     pdf_start_page: int | None = None
     pdf_end_page: int | None = None
-    printed_start_page: int | None = None
-    printed_end_page: int | None = None
+    printed_start_page: str | None = None
+    printed_end_page: str | None = None
     page_numbers: list[int] = field(default_factory=list)
-    printed_page_numbers: list[int] = field(default_factory=list)
+    printed_page_numbers: list[str] = field(default_factory=list)
     page_count: int | None = None
     subsection_text: str | None = None
     subsection_text_plain: str | None = None
@@ -221,6 +221,14 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
+
+
+def _text_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
 def _float_or_none(value: Any) -> float | None:
     if value is None or value == "":
         return None
@@ -241,7 +249,7 @@ def _clean_chapter_title_value(
     value: Any,
     *,
     chapter_number: Any | None = None,
-    printed_start_page: int | None = None,
+    printed_start_page: str | None = None,
 ) -> str | None:
     """Clean chapter titles returned by an LLM or parsed from a noisy TOC.
 
@@ -259,7 +267,7 @@ def _clean_chapter_title_value(
     title = re.sub(r"\bpage\s+[0-9०-९]+$", "", title, flags=re.I).strip()
 
     if printed_start_page is not None:
-        title = re.sub(rf"\s+{printed_start_page}$", "", title).strip()
+        title = re.sub(rf"\s+{re.escape(str(printed_start_page))}$", "", title).strip()
 
     chapter_num = _int_or_none(chapter_number)
     if chapter_num is not None:
@@ -283,7 +291,7 @@ def structure_from_llm_json(data: dict[str, Any], *, detected_by: str, fallback_
             continue
 
         number = raw.get("chapter_number") or raw.get("number") or str(index)
-        printed_start_page = _int_or_none(raw.get("printed_start_page") or raw.get("start_page"))
+        printed_start_page = _text_or_none(raw.get("printed_start_page") or raw.get("start_page"))
         title = _clean_chapter_title_value(
             raw.get("chapter_title") or raw.get("title") or raw.get("name"),
             chapter_number=number,
@@ -297,7 +305,7 @@ def structure_from_llm_json(data: dict[str, Any], *, detected_by: str, fallback_
                 chapter_number=str(number) if number is not None and str(number).strip() else str(index),
                 chapter_title=title,
                 printed_start_page=printed_start_page,
-                printed_end_page=_int_or_none(raw.get("printed_end_page")),
+                printed_end_page=_text_or_none(raw.get("printed_end_page")),
                 pdf_start_page=_int_or_none(raw.get("pdf_start_page")),
                 pdf_end_page=_int_or_none(raw.get("pdf_end_page")),
                 confidence=_float_or_none(raw.get("confidence")) or _float_or_none(data.get("confidence")),
@@ -315,7 +323,7 @@ def structure_from_llm_json(data: dict[str, Any], *, detected_by: str, fallback_
     for index, raw in enumerate(data.get("sections") or [], start=1):
         if not isinstance(raw, dict):
             continue
-        printed_start_page = _int_or_none(raw.get("printed_start_page") or raw.get("start_page"))
+        printed_start_page = _text_or_none(raw.get("printed_start_page") or raw.get("start_page"))
         section_title = _clean_chapter_title_value(
             raw.get("section_title") or raw.get("lesson_title") or raw.get("title") or raw.get("name"),
             chapter_number=None,
@@ -334,7 +342,7 @@ def structure_from_llm_json(data: dict[str, Any], *, detected_by: str, fallback_
                 lesson_title=_clean_title(raw.get("lesson_title")),
                 structure_type="section",
                 printed_start_page=printed_start_page,
-                printed_end_page=_int_or_none(raw.get("printed_end_page")),
+                printed_end_page=_text_or_none(raw.get("printed_end_page")),
                 pdf_start_page=_int_or_none(raw.get("pdf_start_page")),
                 pdf_end_page=_int_or_none(raw.get("pdf_end_page")),
                 confidence=_float_or_none(raw.get("confidence")) or _float_or_none(data.get("confidence")),
@@ -384,7 +392,7 @@ def normalize_chapters(chapters: list[BookChapter]) -> list[BookChapter]:
     valid = [c for c in chapters if c.display_title]
     valid.sort(key=lambda c: (
         c.pdf_start_page if c.pdf_start_page is not None else 10**9,
-        c.printed_start_page if c.printed_start_page is not None else 10**9,
+        _int_or_none(c.printed_start_page) if _int_or_none(c.printed_start_page) is not None else 10**9,
         c.unit_number or "",
         _int_or_none(c.chapter_number) if _int_or_none(c.chapter_number) is not None else 10**9,
         _int_or_none(c.section_number) if _int_or_none(c.section_number) is not None else 10**9,
@@ -490,9 +498,10 @@ def enrich_chapter_page_ranges(chapters: list[BookChapter], pages: list[Extracte
     section_offset = _infer_section_printed_to_pdf_offset(chapters, page_text_by_number, max_page)
     if section_offset is not None:
         for chapter in chapters:
-            if chapter.structure_type != "section" or chapter.printed_start_page is None:
+            printed_start_int = _int_or_none(chapter.printed_start_page)
+            if chapter.structure_type != "section" or printed_start_int is None:
                 continue
-            calculated_pdf = chapter.printed_start_page + section_offset
+            calculated_pdf = printed_start_int + section_offset
             if 1 <= calculated_pdf <= max_page:
                 if chapter.pdf_start_page != calculated_pdf:
                     chapter.metadata["original_pdf_start_page"] = chapter.pdf_start_page
@@ -507,10 +516,11 @@ def enrich_chapter_page_ranges(chapters: list[BookChapter], pages: list[Extracte
     # Step 3: if offset is known, map missing pdf pages from printed pages and repair printed pages.
     if offset is not None:
         for chapter in chapters:
-            if chapter.printed_start_page is None:
+            printed_start_int = _int_or_none(chapter.printed_start_page)
+            if printed_start_int is None:
                 continue
 
-            calculated_pdf = chapter.printed_start_page + offset
+            calculated_pdf = printed_start_int + offset
             if not (1 <= calculated_pdf <= max_page):
                 continue
 
@@ -551,13 +561,14 @@ def enrich_chapter_page_ranges(chapters: list[BookChapter], pages: list[Extracte
         calculated_pdf_end = (next_start - 1) if next_start else max_page
         chapter.pdf_end_page = calculated_pdf_end
 
-        if chapter.printed_start_page is not None:
+        printed_start_int = _int_or_none(chapter.printed_start_page)
+        if printed_start_int is not None:
             if offset is not None and chapter.pdf_end_page is not None:
-                chapter.printed_end_page = chapter.pdf_end_page - offset
+                chapter.printed_end_page = str(chapter.pdf_end_page - offset)
             else:
-                next_printed = mapped[index + 1].printed_start_page if index + 1 < len(mapped) else None
+                next_printed = _int_or_none(mapped[index + 1].printed_start_page) if index + 1 < len(mapped) else None
                 if next_printed is not None:
-                    chapter.printed_end_page = next_printed - 1
+                    chapter.printed_end_page = str(next_printed - 1)
 
     # Return all chapters, but sorted so mapped chapters drive ChapterResolver correctly.
     return normalize_chapters(chapters)
@@ -642,15 +653,15 @@ def _infer_section_printed_to_pdf_offset(
     """
     section_records = [
         c for c in chapters
-        if c.structure_type == "section" and c.printed_start_page is not None and c.display_title
+        if c.structure_type == "section" and _int_or_none(c.printed_start_page) is not None and c.display_title
     ]
     if len(section_records) < 3:
         return None
 
     offsets: list[int] = []
-    for chapter in sorted(section_records, key=lambda c: c.printed_start_page or 10**9):
+    for chapter in sorted(section_records, key=lambda c: _int_or_none(c.printed_start_page) or 10**9):
         title = chapter.display_title or ""
-        printed = chapter.printed_start_page
+        printed = _int_or_none(chapter.printed_start_page)
         if printed is None:
             continue
 
@@ -713,7 +724,7 @@ def _infer_pdf_to_printed_offset(chapters: list[BookChapter]) -> int | None:
 
     # Section-based books such as NCERT Poorvi do not have chapters. Their first
     # lesson/section normally starts on printed page 1. Use that as the anchor.
-    first_printed_page_candidates = [c for c in mapped if c.printed_start_page == 1]
+    first_printed_page_candidates = [c for c in mapped if _int_or_none(c.printed_start_page) == 1]
     if first_printed_page_candidates:
         first = min(first_printed_page_candidates, key=lambda c: c.pdf_start_page or 10**9)
         offset = (first.pdf_start_page or 0) - 1
@@ -725,9 +736,10 @@ def _infer_pdf_to_printed_offset(chapters: list[BookChapter]) -> int | None:
     # Fallback: use the most common existing offset, but only if it has enough support.
     offsets: list[int] = []
     for c in mapped:
-        if c.printed_start_page is None:
+        printed_start_int = _int_or_none(c.printed_start_page)
+        if printed_start_int is None:
             continue
-        offset = c.pdf_start_page - c.printed_start_page
+        offset = c.pdf_start_page - printed_start_int
         # Front matter offset is normally small and non-negative. Ignore suspicious values.
         if 0 <= offset <= 80:
             offsets.append(offset)
@@ -913,11 +925,12 @@ class ChapterResolver:
 
         return max(candidates, key=specificity)
 
-    def printed_page_for_pdf_page(self, page_number: int) -> int | None:
+    def printed_page_for_pdf_page(self, page_number: int) -> str | None:
         chapter = self.chapter_for_pdf_page(page_number)
-        if not chapter or chapter.printed_start_page is None or chapter.pdf_start_page is None:
+        printed_start_int = _int_or_none(chapter.printed_start_page) if chapter else None
+        if not chapter or printed_start_int is None or chapter.pdf_start_page is None:
             return None
-        return chapter.printed_start_page + (page_number - chapter.pdf_start_page)
+        return str(printed_start_int + (page_number - chapter.pdf_start_page))
 
     def structure_for_page(self, page_number: int) -> StructureState:
         chapter = self.chapter_for_pdf_page(page_number)

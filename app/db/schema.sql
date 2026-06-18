@@ -114,8 +114,8 @@ CREATE TABLE IF NOT EXISTS embeddings_book_chapters (
     lesson_title text,
     section_key text,
     structure_type text DEFAULT 'chapter',
-    printed_start_page int,
-    printed_end_page int,
+    printed_start_page text,
+    printed_end_page text,
     pdf_start_page int,
     pdf_end_page int,
     detected_by text,
@@ -134,6 +134,15 @@ ALTER TABLE embeddings_book_chapters ADD COLUMN IF NOT EXISTS section_title text
 ALTER TABLE embeddings_book_chapters ADD COLUMN IF NOT EXISTS lesson_title text;
 ALTER TABLE embeddings_book_chapters ADD COLUMN IF NOT EXISTS section_key text;
 ALTER TABLE embeddings_book_chapters ADD COLUMN IF NOT EXISTS structure_type text DEFAULT 'chapter';
+ALTER TABLE embeddings_book_chapters ADD COLUMN IF NOT EXISTS printed_start_page text;
+ALTER TABLE embeddings_book_chapters ADD COLUMN IF NOT EXISTS printed_end_page text;
+
+-- Printed book page labels are stored as text because books may use values such as
+-- roman numerals, prefixed labels, or extracted labels like "4/34". Numeric JSON
+-- values are still inserted as text, e.g. 12 -> "12".
+ALTER TABLE embeddings_book_chapters
+    ALTER COLUMN printed_start_page TYPE text USING printed_start_page::text,
+    ALTER COLUMN printed_end_page TYPE text USING printed_end_page::text;
 
 -- Stable parent structure key used for both normal chapter books and unit/section books.
 -- Math chapters: section_key = chapter_number (1, 2, 3, ...)
@@ -185,16 +194,16 @@ CREATE TABLE IF NOT EXISTS embeddings_book_subsections (
     subsection_title text,
     anchor_marker text,
     anchor_pdf_page int,
-    anchor_printed_page int,
+    anchor_printed_page text,
     anchor_detection_method text,
     anchor_raw_heading text,
     pdf_start_page int,
     pdf_end_page int,
-    printed_start_page int,
-    printed_end_page int,
+    printed_start_page text,
+    printed_end_page text,
     page_count int,
     page_numbers int[],
-    printed_page_numbers int[],
+    printed_page_numbers text[],
     included_exercises_or_activities text[],
     includes text[],
     subsection_text text,
@@ -222,16 +231,16 @@ ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS subsection_numb
 ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS subsection_title text;
 ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS anchor_marker text;
 ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS anchor_pdf_page int;
-ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS anchor_printed_page int;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS anchor_printed_page text;
 ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS anchor_detection_method text;
 ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS anchor_raw_heading text;
 ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS pdf_start_page int;
 ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS pdf_end_page int;
-ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS printed_start_page int;
-ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS printed_end_page int;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS printed_start_page text;
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS printed_end_page text;
 ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS page_count int;
 ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS page_numbers int[];
-ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS printed_page_numbers int[];
+ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS printed_page_numbers text[];
 ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS included_exercises_or_activities text[];
 ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS includes text[];
 ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS subsection_text text;
@@ -244,6 +253,12 @@ ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS quality_flags t
 ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS excluded_related_pages jsonb DEFAULT '[]'::jsonb;
 ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS math_lines text[];
 ALTER TABLE embeddings_book_subsections ADD COLUMN IF NOT EXISTS metadata jsonb DEFAULT '{}'::jsonb;
+
+ALTER TABLE embeddings_book_subsections
+    ALTER COLUMN anchor_printed_page TYPE text USING anchor_printed_page::text,
+    ALTER COLUMN printed_start_page TYPE text USING printed_start_page::text,
+    ALTER COLUMN printed_end_page TYPE text USING printed_end_page::text,
+    ALTER COLUMN printed_page_numbers TYPE text[] USING printed_page_numbers::text[];
 
 DROP TRIGGER IF EXISTS embeddings_book_subsections_touch_updated_at ON embeddings_book_subsections;
 CREATE TRIGGER embeddings_book_subsections_touch_updated_at
@@ -334,7 +349,7 @@ CREATE TABLE IF NOT EXISTS embeddings_raw_text_pages (
     topic text,
     subtopic text,
     page_number int NOT NULL,
-    printed_page_number int,
+    printed_page_number text,
     raw_text text,
     cleaned_text text,
     detected_language text,
@@ -346,7 +361,7 @@ CREATE TABLE IF NOT EXISTS embeddings_raw_text_pages (
     UNIQUE(document_id, page_number)
 );
 
-ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS printed_page_number int;
+ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS printed_page_number text;
 ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS unit_number text;
 ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS unit_title text;
 ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS lesson_title text;
@@ -356,6 +371,9 @@ ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS subsection_number
 ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS subsection_title text;
 ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS topic text;
 ALTER TABLE embeddings_raw_text_pages ADD COLUMN IF NOT EXISTS subtopic text;
+
+ALTER TABLE embeddings_raw_text_pages
+    ALTER COLUMN printed_page_number TYPE text USING printed_page_number::text;
 
 DROP TRIGGER IF EXISTS embeddings_raw_text_pages_touch_updated_at ON embeddings_raw_text_pages;
 CREATE TRIGGER embeddings_raw_text_pages_touch_updated_at
