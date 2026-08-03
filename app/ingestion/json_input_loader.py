@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 class JsonInputDocument:
     metadata: dict[str, Any]
     pages: list[ExtractedPage]
+    page_extractions: list[dict[str, Any]]
     book_structure: BookStructure
     warnings: list[str]
 
@@ -268,7 +269,13 @@ class JsonExtractionInputLoader:
         if not document_key_was_provided:
             warnings.append(f"document_key was not supplied; derived document_key={metadata['document_key']!r} from metadata.")
         book_structure = self._build_book_structure(extraction, metadata)
-        pages = self._build_pages(extraction, book_structure, warnings)
+        page_extractions = self._build_page_extraction_records(extraction)
+        pages = self._build_pages(
+            extraction,
+            book_structure,
+            warnings,
+            explicit_page_items=page_extractions,
+        )
         if not pages:
             raise ValueError(
                 "JSON input did not contain usable text. Provide extraction.page_extractions, pages, "
@@ -286,6 +293,7 @@ class JsonExtractionInputLoader:
         return JsonInputDocument(
             metadata=metadata,
             pages=pages,
+            page_extractions=page_extractions,
             book_structure=book_structure,
             warnings=warnings,
         )
@@ -763,13 +771,89 @@ class JsonExtractionInputLoader:
         metadata["source"] = "json_input"
         return metadata
 
+    def _build_page_extraction_records(self, extraction: dict[str, Any]) -> list[dict[str, Any]]:
+        """Return one normalized record per physical PDF page.
+
+        ``extraction.page_extractions`` is authoritative when present. Nested
+        ``section_index[].pages[]`` records are merged only to add parent-page
+        relationships such as subsection numbers and page index within a chapter.
+        The full merged dictionaries are later persisted in
+        ``embeddings_page_extractions.source_payload`` so no source field is lost.
+        """
+        explicit_items = (
+            _as_list(extraction.get("page_extractions"))
+            or _as_list(extraction.get("pages"))
+            or _as_list(extraction.get("page_texts"))
+        )
+
+        nested_by_page: dict[int, dict[str, Any]] = {}
+        for parent in _as_list(extraction.get("section_index")):
+            parent_raw = _as_dict(parent)
+            for child in _as_list(parent_raw.get("pages")):
+                child_raw = dict(_as_dict(child))
+                page_number = _int_or_none(
+                    child_raw.get("page_number")
+                    or child_raw.get("pdf_page_number")
+                    or child_raw.get("pdf_page")
+                    or child_raw.get("page")
+                )
+                if page_number is None:
+                    continue
+                child_raw.setdefault("page_number", page_number)
+                child_raw.setdefault("pdf_page_number", page_number)
+                for key in (
+                    "chapter_type", "chapter_number", "chapter_title",
+                    "unit_number", "unit_title", "lesson_title",
+                    "section_number", "section_title",
+                ):
+                    if child_raw.get(key) is None and parent_raw.get(key) is not None:
+                        child_raw[key] = parent_raw.get(key)
+                existing = nested_by_page.setdefault(page_number, {})
+                for key, value in child_raw.items():
+                    if key in {"subsection_numbers", "subsection_titles"}:
+                        combined = _as_text_list(existing.get(key)) + _as_text_list(value)
+                        existing[key] = list(dict.fromkeys(combined))
+                    elif key not in existing or existing.get(key) is None or existing.get(key) == "":
+                        existing[key] = value
+
+        records: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        for index, item in enumerate(explicit_items, start=1):
+            raw = dict(_as_dict(item))
+            if not raw:
+                continue
+            page_number = _int_or_none(
+                raw.get("page_number")
+                or raw.get("pdf_page_number")
+                or raw.get("pdf_page")
+                or raw.get("page")
+                or index
+            )
+            if page_number is None:
+                continue
+            merged = dict(nested_by_page.get(page_number) or {})
+            merged.update(raw)  # top-level page_extractions remains authoritative
+            merged["page_number"] = page_number
+            merged.setdefault("pdf_page_number", page_number)
+            records.append(merged)
+            seen.add(page_number)
+
+        # Some supported JSONs contain only nested chapter pages. Preserve those too.
+        for page_number in sorted(set(nested_by_page) - seen):
+            records.append(dict(nested_by_page[page_number]))
+
+        records.sort(key=lambda item: int(item.get("page_number") or 0))
+        return records
+
     def _build_pages(
         self,
         extraction: dict[str, Any],
         book_structure: BookStructure,
         warnings: list[str],
+        *,
+        explicit_page_items: list[dict[str, Any]] | None = None,
     ) -> list[ExtractedPage]:
-        explicit_page_items = (
+        explicit_page_items = explicit_page_items or (
             _as_list(extraction.get("page_extractions"))
             or _as_list(extraction.get("pages"))
             or _as_list(extraction.get("page_texts"))
@@ -777,8 +861,13 @@ class JsonExtractionInputLoader:
         if explicit_page_items:
             pages = self._pages_from_explicit_items(explicit_page_items)
             if pages:
+                excluded = sum(1 for item in explicit_page_items if _bool_or_none(_as_dict(item).get("include_in_embeddings")) is False)
+                if excluded:
+                    warnings.append(
+                        f"Loaded {len(pages)} physical pages; {excluded} pages are retained for audit but excluded from chunking/embeddings."
+                    )
                 return pages
-            warnings.append("page_extractions/pages were present but no usable page text was found; trying structure text.")
+            warnings.append("page_extractions/pages were present but contained no valid page numbers; trying structure text.")
 
         page_texts: dict[int, list[str]] = {}
         page_metadata: dict[int, dict[str, Any]] = {}
@@ -801,17 +890,77 @@ class JsonExtractionInputLoader:
 
     def _pages_from_explicit_items(self, items: list[Any]) -> list[ExtractedPage]:
         pages: list[ExtractedPage] = []
+        text_fields = {
+            "lesson_text", "chapter_text", "section_text", "page_text",
+            "text", "text_plain", "production_page_text", "production_safe_text",
+            "content", "cleaned_text", "raw_text", "raw_extracted_text",
+            "selectable_text", "ocr_text",
+        }
         for index, item in enumerate(items, start=1):
             raw = _as_dict(item)
             if not raw:
                 continue
-            page_number = _int_or_none(raw.get("page_number") or raw.get("pdf_page") or raw.get("page") or index)
+            page_number = _int_or_none(
+                raw.get("page_number")
+                or raw.get("pdf_page_number")
+                or raw.get("pdf_page")
+                or raw.get("page")
+                or index
+            )
             if page_number is None:
                 continue
-            text = _text_fields(raw)
-            if text is None:
-                continue
-            pages.append(self._build_page(page_number, text, metadata={k: v for k, v in raw.items() if k not in {"text", "raw_text", "cleaned_text"}}))
+
+            include_in_embeddings = _bool_or_none(raw.get("include_in_embeddings"))
+            if include_in_embeddings is False:
+                embedding_text = ""
+            else:
+                embedding_text = _first_text(
+                    raw,
+                    "production_page_text",
+                    "production_safe_text",
+                    "page_text",
+                    "text_plain",
+                    "text",
+                    "cleaned_text",
+                    "content",
+                    "raw_text",
+                    "raw_extracted_text",
+                    "selectable_text",
+                    "ocr_text",
+                ) or ""
+
+            source_raw_text = _first_text(
+                raw,
+                "raw_extracted_text",
+                "selectable_text",
+                "ocr_text",
+                "raw_text",
+                "text",
+                "page_text",
+                "text_plain",
+                "production_page_text",
+                "production_safe_text",
+            ) or ""
+            page_metadata = {k: v for k, v in raw.items() if k not in text_fields}
+            page_metadata["include_in_embeddings"] = include_in_embeddings is not False
+            page_metadata["production_text_source"] = (
+                "production_page_text" if str(raw.get("production_page_text") or "").strip()
+                else "production_safe_text" if str(raw.get("production_safe_text") or "").strip()
+                else "fallback_page_text"
+            )
+
+            page = self._build_page(
+                page_number,
+                embedding_text,
+                metadata=page_metadata,
+                source_raw_text=source_raw_text,
+            )
+            page.extraction_method = _first_text(raw, "extraction_method") or "json_input"
+            page.extraction_quality = _first_text(raw, "extraction_quality") or page.extraction_quality
+            declared_language = _first_text(raw, "detected_language")
+            if declared_language:
+                page.detected_language = declared_language
+            pages.append(page)
         pages.sort(key=lambda p: p.page_number)
         return pages
 
@@ -969,7 +1118,14 @@ class JsonExtractionInputLoader:
             if "\n\n".join(bucket).strip()
         }
 
-    def _build_page(self, page_number: int, raw_text: str, metadata: dict[str, Any] | None = None) -> ExtractedPage:
+    def _build_page(
+        self,
+        page_number: int,
+        raw_text: str,
+        metadata: dict[str, Any] | None = None,
+        *,
+        source_raw_text: str | None = None,
+    ) -> ExtractedPage:
         clean = self.cleaner.clean(raw_text)
         text = clean.cleaned_text
         stats = self.language_detector.detect_with_stats(text)
@@ -995,7 +1151,7 @@ class JsonExtractionInputLoader:
             page_metadata.update(metadata)
         return ExtractedPage(
             page_number=page_number,
-            raw_text=raw_text,
+            raw_text=source_raw_text if source_raw_text is not None else raw_text,
             cleaned_text=text,
             detected_language=stats.language,
             word_count=word_count,

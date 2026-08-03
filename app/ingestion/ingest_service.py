@@ -286,6 +286,7 @@ class IngestService:
         run_id: str | None = None
         warnings: list[str] = []
         pages_count = chunks_count = embeddings_count = subsection_embeddings_count = 0
+        page_extractions_count = 0
         document_id: str | None = None
         json_output_path: Path | None = None
         document_key: str | None = None
@@ -296,8 +297,10 @@ class IngestService:
             metadata = loaded.metadata
             book_structure = loaded.book_structure
             pages = loaded.pages
+            page_extractions = loaded.page_extractions
             warnings.extend(loaded.warnings)
             pages_count = len(pages)
+            page_extractions_count = len(page_extractions)
             document_key = str(metadata.get("document_key") or "").strip()
             if not document_key:
                 raise ValueError("JSON ingestion requires document_key. Add metadata.document_key or document_key at the root.")
@@ -310,7 +313,13 @@ class IngestService:
             metadata["json_identity_hash"] = file_hash
             metadata["json_identity_strategy"] = "sha256(json_document_key:<document_key>)"
             metadata["source_json_path"] = str(json_path)
-            logger.info("Loaded %s JSON text pages from %s with document_key=%s", pages_count, json_path, document_key)
+            logger.info(
+                "Loaded %s physical pages and %s page_extractions records from %s with document_key=%s",
+                pages_count,
+                page_extractions_count,
+                json_path,
+                document_key,
+            )
 
             if not dry_run:
                 existing = self.repository.document_exists_by_document_key(document_key)
@@ -382,6 +391,7 @@ class IngestService:
                     "file_hash": file_hash,
                     "json_input_hash": json_input_hash,
                     "pages_loaded": pages_count,
+                    "page_extractions_loaded": page_extractions_count,
                     "chunks_created": chunks_count,
                     "subsections_detected": len(book_structure.subsections),
                     "detected_language": detected_language,
@@ -424,6 +434,7 @@ class IngestService:
             document_id = self.repository.upsert_document_by_document_key(document)
             self.repository.insert_book_chapters(document_id, book_structure.chapters)
             self.repository.insert_book_subsections(document_id, book_structure.subsections)
+            self.repository.insert_page_extractions(document_id, page_extractions)
             pages_as_dicts = [asdict(p) for p in pages]
             self.repository.insert_pages(document_id, pages_as_dicts)
             chunks_with_ids = self.repository.insert_chunks(document_id, chunks)
@@ -460,6 +471,7 @@ class IngestService:
                 "file_hash": file_hash,
                 "json_input_hash": json_input_hash,
                 "pages_loaded": pages_count,
+                "page_extractions_stored": page_extractions_count,
                 "chunks_created": chunks_count,
                 "embeddings_created": embeddings_count,
                 "chunk_embeddings_created": embeddings_count - subsection_embeddings_count,

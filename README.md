@@ -34,6 +34,7 @@ Do not use `python main.py` unless you intentionally keep a root-level compatibi
 - Model-name-agnostic metadata call; you can change to `gpt-4o-mini` or `gpt-5.4-mini` in `.env`.
 - `embeddings_book_chapters` table.
 - `embeddings_raw_text_pages` now includes chapter and printed page mapping.
+- `embeddings_page_extractions` stores every `extraction.page_extractions[]` record with typed production/audit fields plus the full lossless source payload.
 - Auto chunking per book using LLM recommendation + safe heuristic fallback.
 - Deterministic fallback if LLM metadata detection fails.
 - RAG validation commands to verify table counts, metadata, chapter detection, raw page mapping, and semantic search results.
@@ -97,7 +98,7 @@ LOG_LEVEL=INFO
 This deletes only the embedding pipeline tables.
 
 ```powershell
-python -c "from dotenv import load_dotenv; import os, psycopg; load_dotenv(); conn=psycopg.connect(os.environ['DATABASE_URL'], autocommit=True); cur=conn.cursor(); cur.execute('DROP TABLE IF EXISTS public.embeddings_vectors CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_raw_text_pages CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_book_subsections CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_book_chapters CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_chunks CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_pages CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_ingestion_runs CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_documents CASCADE'); conn.close(); print('Embedding tables deleted')"
+python -c "from dotenv import load_dotenv; import os, psycopg; load_dotenv(); conn=psycopg.connect(os.environ['DATABASE_URL'], autocommit=True); cur=conn.cursor(); cur.execute('DROP TABLE IF EXISTS public.embeddings_vectors CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_raw_text_pages CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_page_extractions CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_book_subsections CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_book_chapters CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_chunks CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_pages CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_ingestion_runs CASCADE'); cur.execute('DROP TABLE IF EXISTS public.embeddings_documents CASCADE'); conn.close(); print('Embedding tables deleted')"
 ```
 
 Then recreate:
@@ -150,8 +151,49 @@ JSON shape:
 - Chapter-based books write `extraction.chapters`.
 - Unit/section-based books write `extraction.sections`.
 - Every JSON includes `extraction.page_extractions` so you can verify text page by page.
-- The normal DB save and embedding flow is unchanged.
+- JSON ingestion now additionally persists the complete page extraction schema in `embeddings_page_extractions`.
 
+
+## Page extraction database storage
+
+For JSON ingestion, every object under `extraction.page_extractions[]` is stored in:
+
+```text
+embeddings_page_extractions
+```
+
+Important behavior:
+
+- All physical pages are stored, including empty cover/front/back-matter pages.
+- `production_page_text` and `production_safe_text` are stored separately from general `text`.
+- `include_in_embeddings=false` pages remain available for audit but are excluded from chunk generation.
+- Chapter, section, subsection, printed-page, extraction, review, and quality fields are mapped to typed columns.
+- The complete merged page object is retained in `source_payload` JSONB, so newly added JSON fields are not lost.
+
+Run `python app/main.py init-db` once before reindexing an existing installation. Then rerun:
+
+```powershell
+python app/main.py ingest-json --json "json_input/First_Flight_Grade10_English_production_ready.json" --reindex
+```
+
+Useful verification query:
+
+```sql
+SELECT
+    COUNT(*) AS stored_pages,
+    COUNT(*) FILTER (WHERE include_in_embeddings) AS embedding_pages,
+    COUNT(*) FILTER (WHERE NOT include_in_embeddings) AS audit_only_pages
+FROM embeddings_page_extractions pe
+JOIN embeddings_documents d ON d.id = pe.document_id
+WHERE d.document_key = 'parivaar-school-class-10-english-first-flight';
+```
+
+Run the included JSON-to-database validator after ingestion:
+
+```powershell
+python validation_script/validate_page_extractions_db.py `
+  --json "json_input/First_Flight_Grade10_English_production_ready.json"
+```
 
 ## Ingest pre-extracted JSON instead of reading the PDF again
 
@@ -248,7 +290,7 @@ Notes:
 
 - `document_key` is stored in `embeddings_documents.document_key` and `embeddings_ingestion_runs.document_key`.
 - The physical JSON file hash is stored as `json_input_hash` in metadata for audit. It is not used as the JSON document identity.
-- `page_extractions` is recommended because it stores exact page-wise text in `embeddings_pages` and `embeddings_raw_text_pages`.
+- `page_extractions` is recommended because it is stored losslessly in `embeddings_page_extractions`; production text is also used by the chunking path while audit-only pages remain excluded.
 - If `page_extractions` is missing, the importer synthesizes page records from each chapter/section `start_page`, `end_page`, and `lesson_text`/`text`.
 - For chapter-based books use `extraction.chapters`.
 - For unit/section-based books use `extraction.sections`; each section lesson can include `unit_number`, `unit_title`, `section_number`, `section_title`, `start_page`, `end_page`, and `lesson_text`.

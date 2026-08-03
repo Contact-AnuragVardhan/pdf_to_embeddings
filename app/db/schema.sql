@@ -102,6 +102,85 @@ CREATE TABLE IF NOT EXISTS embeddings_pages (
     UNIQUE(document_id, page_number)
 );
 
+-- Exact persistence of extraction.page_extractions[] from production JSON.
+-- One row is stored for every physical PDF page, including empty cover/front/back
+-- matter pages. source_payload keeps the complete merged source object losslessly.
+CREATE TABLE IF NOT EXISTS embeddings_page_extractions (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id uuid NOT NULL REFERENCES embeddings_documents(id) ON DELETE CASCADE,
+    page_number int NOT NULL,
+    pdf_page_number int NOT NULL,
+    printed_page_number text,
+    printed_page_label text,
+
+    chapter_type text,
+    structure_type text,
+    chapter_number text,
+    chapter_title text,
+    unit_number text,
+    unit_title text,
+    lesson_title text,
+    section_number text,
+    section_title text,
+    linked_section_number text,
+    linked_section_title text,
+    subsection_numbers text[] DEFAULT ARRAY[]::text[],
+    subsection_titles text[] DEFAULT ARRAY[]::text[],
+    topic text,
+    subtopic text,
+
+    content_type text,
+    assignment_status text,
+    include_in_chapter_text boolean,
+    include_in_lesson_text boolean,
+    include_in_embeddings boolean NOT NULL DEFAULT true,
+    embedding_readiness text,
+
+    source_type text,
+    extraction_method text,
+    extraction_quality text,
+    detected_language text,
+    has_text boolean,
+    has_math boolean,
+    has_table_like_text boolean,
+
+    text text,
+    text_plain text,
+    production_page_text text,
+    production_safe_text text,
+    selectable_text text,
+    raw_extracted_text text,
+    ocr_text text,
+
+    word_count int,
+    token_count int,
+    text_length_chars int,
+    production_text_length_chars int,
+
+    page_index_in_parent int,
+    page_count_in_parent int,
+    is_first_page boolean,
+    is_last_page boolean,
+
+    text_sources text[] DEFAULT ARRAY[]::text[],
+    quality_flags text[] DEFAULT ARRAY[]::text[],
+    production_exclusion_reasons text[] DEFAULT ARRAY[]::text[],
+    unresolved_review_items text[] DEFAULT ARRAY[]::text[],
+    reviewed_items_applied text[] DEFAULT ARRAY[]::text[],
+    layout_validation jsonb DEFAULT '{}'::jsonb,
+    metadata jsonb DEFAULT '{}'::jsonb,
+    source_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+
+    created_at timestamptz DEFAULT now(),
+    updated_at timestamptz DEFAULT now(),
+    UNIQUE(document_id, page_number)
+);
+
+DROP TRIGGER IF EXISTS embeddings_page_extractions_touch_updated_at ON embeddings_page_extractions;
+CREATE TRIGGER embeddings_page_extractions_touch_updated_at
+BEFORE UPDATE ON embeddings_page_extractions
+FOR EACH ROW EXECUTE FUNCTION embeddings_touch_updated_at();
+
 CREATE TABLE IF NOT EXISTS embeddings_book_chapters (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     document_id uuid REFERENCES embeddings_documents(id) ON DELETE CASCADE,
@@ -487,6 +566,11 @@ CREATE INDEX IF NOT EXISTS embeddings_documents_book_title_idx ON embeddings_doc
 CREATE INDEX IF NOT EXISTS embeddings_documents_content_profile_idx ON embeddings_documents(content_profile);
 
 CREATE INDEX IF NOT EXISTS embeddings_pages_document_page_idx ON embeddings_pages(document_id, page_number);
+CREATE INDEX IF NOT EXISTS embeddings_page_extractions_document_page_idx ON embeddings_page_extractions(document_id, page_number);
+CREATE INDEX IF NOT EXISTS embeddings_page_extractions_pdf_page_idx ON embeddings_page_extractions(document_id, pdf_page_number);
+CREATE INDEX IF NOT EXISTS embeddings_page_extractions_printed_page_idx ON embeddings_page_extractions(document_id, printed_page_number);
+CREATE INDEX IF NOT EXISTS embeddings_page_extractions_section_idx ON embeddings_page_extractions(document_id, section_number);
+CREATE INDEX IF NOT EXISTS embeddings_page_extractions_embedding_flag_idx ON embeddings_page_extractions(document_id, include_in_embeddings);
 
 CREATE INDEX IF NOT EXISTS embeddings_book_chapters_document_idx ON embeddings_book_chapters(document_id);
 CREATE INDEX IF NOT EXISTS embeddings_book_chapters_section_key_idx ON embeddings_book_chapters(document_id, section_key);

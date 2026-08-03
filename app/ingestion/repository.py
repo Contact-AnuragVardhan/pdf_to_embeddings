@@ -265,6 +265,165 @@ class RagRepository:
             with conn.cursor() as cur:
                 cur.executemany(sql, params)
 
+    def insert_page_extractions(self, document_id: str, page_extractions: list[dict[str, Any]]) -> None:
+        """Persist extraction.page_extractions[] without dropping source fields.
+
+        Frequently queried fields are mapped to typed columns. The complete merged
+        page object is also stored in source_payload JSONB for lossless audit and
+        forward compatibility with new extraction fields.
+        """
+        if not page_extractions:
+            return
+
+        columns = [
+            "document_id", "page_number", "pdf_page_number",
+            "printed_page_number", "printed_page_label",
+            "chapter_type", "structure_type", "chapter_number", "chapter_title",
+            "unit_number", "unit_title", "lesson_title",
+            "section_number", "section_title",
+            "linked_section_number", "linked_section_title",
+            "subsection_numbers", "subsection_titles", "topic", "subtopic",
+            "content_type", "assignment_status",
+            "include_in_chapter_text", "include_in_lesson_text",
+            "include_in_embeddings", "embedding_readiness",
+            "source_type", "extraction_method", "extraction_quality",
+            "detected_language", "has_text", "has_math", "has_table_like_text",
+            "text", "text_plain", "production_page_text", "production_safe_text",
+            "selectable_text", "raw_extracted_text", "ocr_text",
+            "word_count", "token_count", "text_length_chars",
+            "production_text_length_chars",
+            "page_index_in_parent", "page_count_in_parent",
+            "is_first_page", "is_last_page",
+            "text_sources", "quality_flags", "production_exclusion_reasons",
+            "unresolved_review_items", "reviewed_items_applied",
+            "layout_validation", "metadata", "source_payload",
+        ]
+        json_columns = {"layout_validation", "metadata", "source_payload"}
+        array_columns = {
+            "subsection_numbers", "subsection_titles", "text_sources",
+            "quality_flags", "production_exclusion_reasons",
+            "unresolved_review_items", "reviewed_items_applied",
+        }
+        source_field_names = set(columns) - {"document_id"}
+        source_field_names.add("page_text")
+
+        def as_bool(value: Any, default: bool | None = None) -> bool | None:
+            if value is None:
+                return default
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return bool(value)
+            text = str(value).strip().lower()
+            if text in {"true", "1", "yes", "y", "on"}:
+                return True
+            if text in {"false", "0", "no", "n", "off"}:
+                return False
+            return default
+
+        def as_text_array(value: Any) -> list[str]:
+            if value is None:
+                return []
+            if isinstance(value, (list, tuple, set)):
+                return [str(item) for item in value if str(item).strip()]
+            text = str(value).strip()
+            return [text] if text else []
+
+        placeholders = ", ".join(
+            "%s::jsonb" if column in json_columns else "%s"
+            for column in columns
+        )
+        update_columns = [column for column in columns if column not in {"document_id", "page_number"}]
+        update_clause = ", ".join(f"{column}=EXCLUDED.{column}" for column in update_columns)
+        sql = f"""
+            INSERT INTO embeddings_page_extractions({', '.join(columns)})
+            VALUES ({placeholders})
+            ON CONFLICT(document_id, page_number) DO UPDATE SET {update_clause}
+        """
+
+        params: list[tuple[Any, ...]] = []
+        for source in page_extractions:
+            raw = dict(source or {})
+            page_number = raw.get("page_number") or raw.get("pdf_page_number")
+            if page_number is None:
+                continue
+            page_number = int(page_number)
+            pdf_page_number = int(raw.get("pdf_page_number") or page_number)
+
+            text_value = raw.get("text")
+            if text_value is None:
+                text_value = raw.get("page_text")
+            text_plain = raw.get("text_plain")
+            if text_plain is None:
+                text_plain = text_value
+            production_page_text = raw.get("production_page_text")
+            production_safe_text = raw.get("production_safe_text")
+
+            raw_metadata = raw.get("metadata")
+            metadata_value = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
+            metadata_value.setdefault("source", "extraction.page_extractions")
+            extra_fields = {
+                key: value for key, value in raw.items()
+                if key not in source_field_names and key != "metadata"
+            }
+            if extra_fields:
+                metadata_value["unmapped_fields"] = extra_fields
+
+            normalized = dict(raw)
+            normalized.update({
+                "document_id": document_id,
+                "page_number": page_number,
+                "pdf_page_number": pdf_page_number,
+                "printed_page_number": (
+                    None if raw.get("printed_page_number") is None
+                    else str(raw.get("printed_page_number"))
+                ),
+                "text": text_value,
+                "text_plain": text_plain,
+                "production_page_text": production_page_text,
+                "production_safe_text": production_safe_text,
+                "include_in_embeddings": as_bool(raw.get("include_in_embeddings"), True),
+                "include_in_chapter_text": as_bool(raw.get("include_in_chapter_text")),
+                "include_in_lesson_text": as_bool(raw.get("include_in_lesson_text")),
+                "has_text": (
+                    bool(str(production_page_text or production_safe_text or text_value or "").strip())
+                    if raw.get("has_text") is None else as_bool(raw.get("has_text"), False)
+                ),
+                "has_math": as_bool(raw.get("has_math")),
+                "has_table_like_text": as_bool(raw.get("has_table_like_text")),
+                "is_first_page": as_bool(raw.get("is_first_page")),
+                "is_last_page": as_bool(raw.get("is_last_page")),
+                "text_length_chars": (
+                    len(str(text_value or ""))
+                    if raw.get("text_length_chars") is None else raw.get("text_length_chars")
+                ),
+                "production_text_length_chars": (
+                    len(str(production_page_text or production_safe_text or ""))
+                    if raw.get("production_text_length_chars") is None
+                    else raw.get("production_text_length_chars")
+                ),
+                "layout_validation": raw.get("layout_validation") or {},
+                "metadata": metadata_value,
+                "source_payload": raw,
+            })
+
+            values: list[Any] = []
+            for column in columns:
+                value = normalized.get(column)
+                if column in json_columns:
+                    values.append(_json(value or {}))
+                elif column in array_columns:
+                    values.append(_array(as_text_array(value)))
+                else:
+                    values.append(value)
+            params.append(tuple(values))
+
+        if not params:
+            return
+        with get_connection(self.database_url) as conn, conn.transaction():
+            with conn.cursor() as cur:
+                cur.executemany(sql, params)
+
     def insert_pages(self, document_id: str, pages: list[dict[str, Any]]) -> None:
         sql = """
         INSERT INTO embeddings_pages(
@@ -560,6 +719,8 @@ class RagRepository:
                d.document_key, d.file_name, d.file_hash, d.total_pages, d.total_words, d.total_tokens,
                (SELECT COUNT(*)::int FROM embeddings_chunks c WHERE c.document_id = d.id) AS chunks,
                (SELECT COUNT(*)::int FROM embeddings_book_subsections s WHERE s.document_id = d.id) AS subsections,
+               (SELECT COUNT(*)::int FROM embeddings_page_extractions pe WHERE pe.document_id = d.id) AS page_extractions,
+               (SELECT COUNT(*)::int FROM embeddings_page_extractions pe WHERE pe.document_id = d.id AND pe.include_in_embeddings) AS embedding_eligible_pages,
                (SELECT COUNT(*)::int FROM embeddings_vectors v WHERE v.document_id = d.id) AS embeddings,
                (SELECT COUNT(*)::int FROM embeddings_subsection_vectors sv WHERE sv.document_id = d.id) AS subsection_embeddings,
                (
