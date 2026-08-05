@@ -19,3 +19,5 @@ python app/main.py ingest-json --json "json_input/Grade10_Maths_production_ready
 python app/main.py ingest-json --json "json_input/Santoor_Grade4_English_production_ready.json" --reindex
 
 python app/main.py ingest-json --json "json_input/Our_Wondrous_World_Grade4_EVS_production_ready.json" --reindex
+
+python app/main.py ingest-json --json "json_input/NCERT_Grade10_Mathematics_production_ready.json" --reindex
