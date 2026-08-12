@@ -41,9 +41,17 @@ Do not use `python main.py` unless you intentionally keep a root-level compatibi
 
 ## Important OpenAI model settings
 
-Embeddings stay fixed because the DB column is `vector(3072)`:
+Embedding generation is disabled by default. Enable it explicitly when you want
+chunk and subsection vectors to be created:
 
 ```env
+GENERATE_EMBEDDINGS=false
+```
+
+When enabled, the embedding model stays fixed because the DB column is `vector(3072)`:
+
+```env
+GENERATE_EMBEDDINGS=true
 OPENAI_EMBEDDING_MODEL=text-embedding-3-large
 OPENAI_EMBEDDING_DIMENSIONS=3072
 ```
@@ -75,6 +83,8 @@ Edit `.env`:
 ```env
 OPENAI_API_KEY=your_key
 
+# Default is false. Set true only when you want embeddings created during ingestion.
+GENERATE_EMBEDDINGS=false
 OPENAI_EMBEDDING_MODEL=text-embedding-3-large
 OPENAI_EMBEDDING_DIMENSIONS=3072
 

@@ -194,17 +194,24 @@ class IngestService:
             chunks_with_ids = self.repository.insert_chunks(document_id, chunks)
             self.repository.insert_raw_text_pages(document_id, pages_as_dicts, chunks_with_ids, metadata, book_structure=book_structure)
 
-            self.settings.validate_for_embedding()
-            embedding_service = OpenAIEmbeddingService(self.settings, self.token_counter)
-            embeddings = embedding_service.embed_chunks(chunks_with_ids, document_id)
-            self.repository.insert_embeddings(embeddings)
-            chunk_embeddings_count = len(embeddings)
+            chunk_embeddings_count = 0
+            if self.settings.generate_embeddings:
+                self.settings.validate_for_embedding()
+                embedding_service = OpenAIEmbeddingService(self.settings, self.token_counter)
+                embeddings = embedding_service.embed_chunks(chunks_with_ids, document_id)
+                self.repository.insert_embeddings(embeddings)
+                chunk_embeddings_count = len(embeddings)
 
-            subsection_rows = self.repository.get_subsections_for_embedding(document_id)
-            subsection_embeddings = embedding_service.embed_subsections(subsection_rows, document_id)
-            self.repository.insert_subsection_embeddings(subsection_embeddings)
-            subsection_embeddings_count = len(subsection_embeddings)
-            embeddings_count = chunk_embeddings_count + subsection_embeddings_count
+                subsection_rows = self.repository.get_subsections_for_embedding(document_id)
+                subsection_embeddings = embedding_service.embed_subsections(subsection_rows, document_id)
+                self.repository.insert_subsection_embeddings(subsection_embeddings)
+                subsection_embeddings_count = len(subsection_embeddings)
+                embeddings_count = chunk_embeddings_count + subsection_embeddings_count
+            else:
+                logger.info(
+                    "Embedding generation skipped because GENERATE_EMBEDDINGS is disabled. "
+                    "Set GENERATE_EMBEDDINGS=true to create chunk and subsection embeddings."
+                )
 
             if run_id:
                 self.repository.finish_ingestion_run(
@@ -227,8 +234,9 @@ class IngestService:
                 "file_hash": file_hash,
                 "pages_extracted": pages_count,
                 "chunks_created": chunks_count,
+                "embeddings_enabled": self.settings.generate_embeddings,
                 "embeddings_created": embeddings_count,
-                "chunk_embeddings_created": embeddings_count - subsection_embeddings_count,
+                "chunk_embeddings_created": chunk_embeddings_count,
                 "subsection_embeddings_created": subsection_embeddings_count,
                 "book_structure": {
                     "detected_by": book_structure.detected_by,
@@ -269,11 +277,12 @@ class IngestService:
         output_json_dir: Path | None = None,
         log_page_text: bool | None = None,
     ) -> dict[str, Any]:
-        """Ingest pre-extracted JSON and then run the normal embedding flow.
+        """Ingest pre-extracted JSON and optionally generate embeddings.
 
         This is a parallel entry point to ``ingest_pdf``. It skips PDF/OCR/LLM
         extraction because the JSON already contains page/chapter/section text,
-        then reuses the same chunker, repositories, and embedding service.
+        then reuses the same chunker and repositories. Embeddings are generated
+        only when ``GENERATE_EMBEDDINGS=true``.
 
         For JSON ingestion, document identity is ``document_key``. The raw JSON
         content hash is stored only as metadata/audit data so editing the JSON does
@@ -440,17 +449,24 @@ class IngestService:
             chunks_with_ids = self.repository.insert_chunks(document_id, chunks)
             self.repository.insert_raw_text_pages(document_id, pages_as_dicts, chunks_with_ids, metadata, book_structure=book_structure)
 
-            self.settings.validate_for_embedding()
-            embedding_service = OpenAIEmbeddingService(self.settings, self.token_counter)
-            embeddings = embedding_service.embed_chunks(chunks_with_ids, document_id)
-            self.repository.insert_embeddings(embeddings)
-            chunk_embeddings_count = len(embeddings)
+            chunk_embeddings_count = 0
+            if self.settings.generate_embeddings:
+                self.settings.validate_for_embedding()
+                embedding_service = OpenAIEmbeddingService(self.settings, self.token_counter)
+                embeddings = embedding_service.embed_chunks(chunks_with_ids, document_id)
+                self.repository.insert_embeddings(embeddings)
+                chunk_embeddings_count = len(embeddings)
 
-            subsection_rows = self.repository.get_subsections_for_embedding(document_id)
-            subsection_embeddings = embedding_service.embed_subsections(subsection_rows, document_id)
-            self.repository.insert_subsection_embeddings(subsection_embeddings)
-            subsection_embeddings_count = len(subsection_embeddings)
-            embeddings_count = chunk_embeddings_count + subsection_embeddings_count
+                subsection_rows = self.repository.get_subsections_for_embedding(document_id)
+                subsection_embeddings = embedding_service.embed_subsections(subsection_rows, document_id)
+                self.repository.insert_subsection_embeddings(subsection_embeddings)
+                subsection_embeddings_count = len(subsection_embeddings)
+                embeddings_count = chunk_embeddings_count + subsection_embeddings_count
+            else:
+                logger.info(
+                    "Embedding generation skipped because GENERATE_EMBEDDINGS is disabled. "
+                    "Set GENERATE_EMBEDDINGS=true to create chunk and subsection embeddings."
+                )
 
             if run_id:
                 self.repository.finish_ingestion_run(
@@ -473,8 +489,9 @@ class IngestService:
                 "pages_loaded": pages_count,
                 "page_extractions_stored": page_extractions_count,
                 "chunks_created": chunks_count,
+                "embeddings_enabled": self.settings.generate_embeddings,
                 "embeddings_created": embeddings_count,
-                "chunk_embeddings_created": embeddings_count - subsection_embeddings_count,
+                "chunk_embeddings_created": chunk_embeddings_count,
                 "subsection_embeddings_created": subsection_embeddings_count,
                 "book_structure": {
                     "detected_by": book_structure.detected_by,

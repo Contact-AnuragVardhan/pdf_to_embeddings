@@ -35,6 +35,7 @@ class Settings:
     chunk_max_tokens: int
     chunk_overlap_tokens: int
     embedding_batch_size: int
+    generate_embeddings: bool
     reindex_existing: bool
     log_level: str
     project_root: Path
@@ -79,6 +80,7 @@ class Settings:
             chunk_max_tokens=_as_int(os.getenv("DEFAULT_CHUNK_MAX_TOKENS"), 750),
             chunk_overlap_tokens=_as_int(os.getenv("DEFAULT_CHUNK_OVERLAP_TOKENS"), 120),
             embedding_batch_size=_as_int(os.getenv("EMBEDDING_BATCH_SIZE"), 64),
+            generate_embeddings=_as_bool(os.getenv("GENERATE_EMBEDDINGS"), False),
             reindex_existing=_as_bool(os.getenv("REINDEX_EXISTING"), False),
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
             project_root=Path(__file__).resolve().parent,

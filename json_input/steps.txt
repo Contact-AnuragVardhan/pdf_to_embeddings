@@ -20,4 +20,6 @@ python app/main.py ingest-json --json "json_input/Santoor_Grade4_English_product
 
 python app/main.py ingest-json --json "json_input/Our_Wondrous_World_Grade4_EVS_production_ready.json" --reindex
 
-python app/main.py ingest-json --json "json_input/NCERT_Grade10_Mathematics_production_ready.json" --reindex
+python app/main.py ingest-json --json "json_input/NCERT_Grade10_Mathematics_Hindi_production_ready.json" --reindex
+
+python app/main.py ingest-json --json "json_input/Kritika_Grade9_Hindi_production_ready.json" --reindex
