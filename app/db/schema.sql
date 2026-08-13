@@ -344,6 +344,124 @@ CREATE TRIGGER embeddings_book_subsections_touch_updated_at
 BEFORE UPDATE ON embeddings_book_subsections
 FOR EACH ROW EXECUTE FUNCTION embeddings_touch_updated_at();
 
+-- Optional real-teacher weekly schedules are stored separately from the
+-- maintained structural subsection/day ranges.  This keeps all existing books
+-- backward-compatible while allowing question-targeted, overlapping, and
+-- non-contiguous page selections for Teacher Helper.
+CREATE TABLE IF NOT EXISTS embeddings_teacher_schedules (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id uuid NOT NULL REFERENCES embeddings_documents(id) ON DELETE CASCADE,
+    schedule_key text NOT NULL,
+    chapter_number text,
+    chapter_title text,
+    unit_number text,
+    unit_title text,
+    section_number text,
+    section_title text,
+    lesson_title text,
+    week_start_date date,
+    schedule_source text,
+    schedule_type text,
+    exercise text,
+    schedule_note text,
+    schedule_is_additive boolean,
+    structural_subsections_unchanged boolean,
+    teacher_facing_page_system text,
+    internal_page_system text,
+    metadata jsonb DEFAULT '{}'::jsonb,
+    source_payload jsonb DEFAULT '{}'::jsonb,
+    created_at timestamptz DEFAULT now(),
+    updated_at timestamptz DEFAULT now(),
+    UNIQUE(document_id, schedule_key)
+);
+
+ALTER TABLE embeddings_teacher_schedules ADD COLUMN IF NOT EXISTS schedule_key text;
+ALTER TABLE embeddings_teacher_schedules ADD COLUMN IF NOT EXISTS chapter_number text;
+ALTER TABLE embeddings_teacher_schedules ADD COLUMN IF NOT EXISTS chapter_title text;
+ALTER TABLE embeddings_teacher_schedules ADD COLUMN IF NOT EXISTS unit_number text;
+ALTER TABLE embeddings_teacher_schedules ADD COLUMN IF NOT EXISTS unit_title text;
+ALTER TABLE embeddings_teacher_schedules ADD COLUMN IF NOT EXISTS section_number text;
+ALTER TABLE embeddings_teacher_schedules ADD COLUMN IF NOT EXISTS section_title text;
+ALTER TABLE embeddings_teacher_schedules ADD COLUMN IF NOT EXISTS lesson_title text;
+ALTER TABLE embeddings_teacher_schedules ADD COLUMN IF NOT EXISTS week_start_date date;
+ALTER TABLE embeddings_teacher_schedules ADD COLUMN IF NOT EXISTS schedule_source text;
+ALTER TABLE embeddings_teacher_schedules ADD COLUMN IF NOT EXISTS schedule_type text;
+ALTER TABLE embeddings_teacher_schedules ADD COLUMN IF NOT EXISTS exercise text;
+ALTER TABLE embeddings_teacher_schedules ADD COLUMN IF NOT EXISTS schedule_note text;
+ALTER TABLE embeddings_teacher_schedules ADD COLUMN IF NOT EXISTS schedule_is_additive boolean;
+ALTER TABLE embeddings_teacher_schedules ADD COLUMN IF NOT EXISTS structural_subsections_unchanged boolean;
+ALTER TABLE embeddings_teacher_schedules ADD COLUMN IF NOT EXISTS teacher_facing_page_system text;
+ALTER TABLE embeddings_teacher_schedules ADD COLUMN IF NOT EXISTS internal_page_system text;
+ALTER TABLE embeddings_teacher_schedules ADD COLUMN IF NOT EXISTS metadata jsonb DEFAULT '{}'::jsonb;
+ALTER TABLE embeddings_teacher_schedules ADD COLUMN IF NOT EXISTS source_payload jsonb DEFAULT '{}'::jsonb;
+
+CREATE UNIQUE INDEX IF NOT EXISTS embeddings_teacher_schedules_document_key_uidx
+ON embeddings_teacher_schedules(document_id, schedule_key);
+
+DROP TRIGGER IF EXISTS embeddings_teacher_schedules_touch_updated_at ON embeddings_teacher_schedules;
+CREATE TRIGGER embeddings_teacher_schedules_touch_updated_at
+BEFORE UPDATE ON embeddings_teacher_schedules
+FOR EACH ROW EXECUTE FUNCTION embeddings_touch_updated_at();
+
+CREATE TABLE IF NOT EXISTS embeddings_teacher_schedule_days (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    teacher_schedule_id uuid NOT NULL REFERENCES embeddings_teacher_schedules(id) ON DELETE CASCADE,
+    document_id uuid NOT NULL REFERENCES embeddings_documents(id) ON DELETE CASCADE,
+    day int,
+    weekday text,
+    day_type text,
+    activity text,
+    topic text,
+    teaching_book_page_ranges jsonb DEFAULT '[]'::jsonb,
+    exercise_book_pages int[] DEFAULT '{}'::int[],
+    exercise text,
+    questions text[] DEFAULT '{}'::text[],
+    range_source text,
+    source_input_warning text,
+    selected_book_pages int[] DEFAULT '{}'::int[],
+    selected_pdf_pages int[] DEFAULT '{}'::int[],
+    selected_page_count int,
+    selection_is_contiguous boolean,
+    display_book_pages text,
+    display_pdf_pages text,
+    selection_policy text,
+    selected_pages_available boolean,
+    metadata jsonb DEFAULT '{}'::jsonb,
+    source_payload jsonb DEFAULT '{}'::jsonb,
+    created_at timestamptz DEFAULT now(),
+    updated_at timestamptz DEFAULT now(),
+    UNIQUE(teacher_schedule_id, day)
+);
+
+ALTER TABLE embeddings_teacher_schedule_days ADD COLUMN IF NOT EXISTS teacher_schedule_id uuid;
+ALTER TABLE embeddings_teacher_schedule_days ADD COLUMN IF NOT EXISTS document_id uuid;
+ALTER TABLE embeddings_teacher_schedule_days ADD COLUMN IF NOT EXISTS day int;
+ALTER TABLE embeddings_teacher_schedule_days ADD COLUMN IF NOT EXISTS weekday text;
+ALTER TABLE embeddings_teacher_schedule_days ADD COLUMN IF NOT EXISTS day_type text;
+ALTER TABLE embeddings_teacher_schedule_days ADD COLUMN IF NOT EXISTS activity text;
+ALTER TABLE embeddings_teacher_schedule_days ADD COLUMN IF NOT EXISTS topic text;
+ALTER TABLE embeddings_teacher_schedule_days ADD COLUMN IF NOT EXISTS teaching_book_page_ranges jsonb DEFAULT '[]'::jsonb;
+ALTER TABLE embeddings_teacher_schedule_days ADD COLUMN IF NOT EXISTS exercise_book_pages int[] DEFAULT '{}'::int[];
+ALTER TABLE embeddings_teacher_schedule_days ADD COLUMN IF NOT EXISTS exercise text;
+ALTER TABLE embeddings_teacher_schedule_days ADD COLUMN IF NOT EXISTS questions text[] DEFAULT '{}'::text[];
+ALTER TABLE embeddings_teacher_schedule_days ADD COLUMN IF NOT EXISTS range_source text;
+ALTER TABLE embeddings_teacher_schedule_days ADD COLUMN IF NOT EXISTS source_input_warning text;
+ALTER TABLE embeddings_teacher_schedule_days ADD COLUMN IF NOT EXISTS selected_book_pages int[] DEFAULT '{}'::int[];
+ALTER TABLE embeddings_teacher_schedule_days ADD COLUMN IF NOT EXISTS selected_pdf_pages int[] DEFAULT '{}'::int[];
+ALTER TABLE embeddings_teacher_schedule_days ADD COLUMN IF NOT EXISTS selected_page_count int;
+ALTER TABLE embeddings_teacher_schedule_days ADD COLUMN IF NOT EXISTS selection_is_contiguous boolean;
+ALTER TABLE embeddings_teacher_schedule_days ADD COLUMN IF NOT EXISTS display_book_pages text;
+ALTER TABLE embeddings_teacher_schedule_days ADD COLUMN IF NOT EXISTS display_pdf_pages text;
+ALTER TABLE embeddings_teacher_schedule_days ADD COLUMN IF NOT EXISTS selection_policy text;
+ALTER TABLE embeddings_teacher_schedule_days ADD COLUMN IF NOT EXISTS selected_pages_available boolean;
+ALTER TABLE embeddings_teacher_schedule_days ADD COLUMN IF NOT EXISTS metadata jsonb DEFAULT '{}'::jsonb;
+ALTER TABLE embeddings_teacher_schedule_days ADD COLUMN IF NOT EXISTS source_payload jsonb DEFAULT '{}'::jsonb;
+
+DROP TRIGGER IF EXISTS embeddings_teacher_schedule_days_touch_updated_at ON embeddings_teacher_schedule_days;
+CREATE TRIGGER embeddings_teacher_schedule_days_touch_updated_at
+BEFORE UPDATE ON embeddings_teacher_schedule_days
+FOR EACH ROW EXECUTE FUNCTION embeddings_touch_updated_at();
+
 CREATE TABLE IF NOT EXISTS embeddings_chunks (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     document_id uuid REFERENCES embeddings_documents(id) ON DELETE CASCADE,
@@ -587,6 +705,17 @@ CREATE INDEX IF NOT EXISTS embeddings_book_subsections_section_idx ON embeddings
 CREATE INDEX IF NOT EXISTS embeddings_book_subsections_subsection_idx ON embeddings_book_subsections(document_id, subsection_number, subsection_title);
 CREATE INDEX IF NOT EXISTS embeddings_book_subsections_pdf_range_idx ON embeddings_book_subsections(document_id, pdf_start_page, pdf_end_page);
 CREATE INDEX IF NOT EXISTS embeddings_book_subsections_metadata_idx ON embeddings_book_subsections USING GIN(metadata);
+
+CREATE INDEX IF NOT EXISTS embeddings_teacher_schedules_document_idx ON embeddings_teacher_schedules(document_id);
+CREATE INDEX IF NOT EXISTS embeddings_teacher_schedules_week_idx ON embeddings_teacher_schedules(document_id, week_start_date);
+CREATE INDEX IF NOT EXISTS embeddings_teacher_schedules_chapter_idx ON embeddings_teacher_schedules(document_id, chapter_number, chapter_title);
+CREATE INDEX IF NOT EXISTS embeddings_teacher_schedules_exercise_idx ON embeddings_teacher_schedules(document_id, exercise);
+CREATE INDEX IF NOT EXISTS embeddings_teacher_schedules_metadata_idx ON embeddings_teacher_schedules USING GIN(metadata);
+CREATE INDEX IF NOT EXISTS embeddings_teacher_schedule_days_document_idx ON embeddings_teacher_schedule_days(document_id);
+CREATE INDEX IF NOT EXISTS embeddings_teacher_schedule_days_schedule_day_idx ON embeddings_teacher_schedule_days(teacher_schedule_id, day);
+CREATE INDEX IF NOT EXISTS embeddings_teacher_schedule_days_weekday_idx ON embeddings_teacher_schedule_days(document_id, weekday);
+CREATE INDEX IF NOT EXISTS embeddings_teacher_schedule_days_book_pages_idx ON embeddings_teacher_schedule_days USING GIN(selected_book_pages);
+CREATE INDEX IF NOT EXISTS embeddings_teacher_schedule_days_pdf_pages_idx ON embeddings_teacher_schedule_days USING GIN(selected_pdf_pages);
 
 CREATE INDEX IF NOT EXISTS embeddings_chunks_document_idx ON embeddings_chunks(document_id);
 CREATE INDEX IF NOT EXISTS embeddings_chunks_chapter_title_idx ON embeddings_chunks(chapter_title);

@@ -205,6 +205,46 @@ python validation_script/validate_page_extractions_db.py `
   --json "json_input/First_Flight_Grade10_English_production_ready.json"
 ```
 
+## Optional teacher weekly schedules
+
+JSON books may now add real teacher planning metadata using either
+`teacher_schedule` (one week) or `teacher_schedules` (multiple weeks) on a
+chapter/section. These records are additive and do **not** replace or modify the
+existing structural `subsections`/days.
+
+They are persisted in:
+
+```text
+embeddings_teacher_schedules
+embeddings_teacher_schedule_days
+```
+
+The day table stores exact `selected_book_pages`, `selected_pdf_pages`, exercise
+pages, question labels, topic/activity text, and non-contiguous teaching page
+ranges. Books without teacher schedules continue to ingest exactly as before.
+
+After upgrading an existing database, run:
+
+```powershell
+python app/main.py init-db
+```
+
+Then reindex the schedule-enabled JSON, for example:
+
+```powershell
+python app/main.py ingest-json `
+  --json "json_input/NCERT_Grade10_Mathematics_Hindi_production_ready.json" `
+  --reindex
+```
+
+Verify a week directly from the DB:
+
+```powershell
+python app/main.py list-teacher-schedules `
+  --document-key "parivaar-school-class-10-mathematics-ncert-hindi" `
+  --week-start-date "2026-08-24"
+```
+
 ## Ingest pre-extracted JSON instead of reading the PDF again
 
 Use this when another process has already extracted book text chapter-wise or section-wise. The JSON should **not** contain embeddings. This command bypasses OCR/PDF extraction, saves the document, book structures, page text, raw page text, chunks, and then creates embeddings from the extracted text.

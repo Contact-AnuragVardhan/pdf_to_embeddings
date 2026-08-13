@@ -176,6 +176,16 @@ def build_parser() -> argparse.ArgumentParser:
     add_structure_query_args(list_subsections)
     list_subsections.set_defaults(handler=handle_list_subsections)
 
+    list_teacher_schedules = sub.add_parser(
+        "list-teacher-schedules",
+        help="List optional real-teacher weekly schedule days with exact selected book/PDF pages.",
+    )
+    add_structure_query_args(list_teacher_schedules)
+    list_teacher_schedules.add_argument("--week-start-date", help="Week start date in YYYY-MM-DD format.")
+    list_teacher_schedules.add_argument("--exercise", help="Exercise identifier, e.g. 4.2.")
+    list_teacher_schedules.add_argument("--weekday", help="Optional weekday filter, e.g. Monday.")
+    list_teacher_schedules.set_defaults(handler=handle_list_teacher_schedules)
+
     subsection_text = sub.add_parser("subsection-text", help="Fetch exact text and pages for one or more stored subsections.")
     add_structure_query_args(subsection_text, include_subsection=True)
     subsection_text.set_defaults(handler=handle_subsection_text)
@@ -294,6 +304,8 @@ def handle_ingest_json(args: argparse.Namespace, settings: Settings) -> None:
                     "pages_detected": len(loaded.pages),
                     "structures_detected": len(loaded.book_structure.chapters),
                     "subsections_detected": len(loaded.book_structure.subsections),
+                    "teacher_schedules_detected": len(loaded.teacher_schedules),
+                    "teacher_schedule_days_detected": sum(len(item.get("days") or []) for item in loaded.teacher_schedules),
                     "warnings": loaded.warnings,
                 },
                 default=str,
@@ -385,6 +397,25 @@ def handle_chapter_text(args: argparse.Namespace, settings: Settings) -> None:
 def handle_list_subsections(args: argparse.Namespace, settings: Settings) -> None:
     repository = RagRepository(settings.database_url)
     result = repository.list_subsections(**_structure_query_kwargs(args))
+    console.print_json(json=json.dumps(result, default=str, ensure_ascii=False, indent=2))
+
+
+def handle_list_teacher_schedules(args: argparse.Namespace, settings: Settings) -> None:
+    repository = RagRepository(settings.database_url)
+    query = _structure_query_kwargs(args)
+    # Teacher schedule storage is chapter/section aware; unit filters are not
+    # needed for the current Teacher Helper lookup contract.
+    result = repository.list_teacher_schedule_days(
+        document_id=query.get("document_id"),
+        document_key=query.get("document_key"),
+        chapter_number=query.get("chapter_number"),
+        chapter_title=query.get("chapter_title"),
+        section_number=query.get("section_number"),
+        section_title=query.get("section_title"),
+        week_start_date=args.week_start_date,
+        exercise=args.exercise,
+        weekday=args.weekday,
+    )
     console.print_json(json=json.dumps(result, default=str, ensure_ascii=False, indent=2))
 
 

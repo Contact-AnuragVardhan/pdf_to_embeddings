@@ -22,6 +22,7 @@ class JsonInputDocument:
     metadata: dict[str, Any]
     pages: list[ExtractedPage]
     page_extractions: list[dict[str, Any]]
+    teacher_schedules: list[dict[str, Any]]
     book_structure: BookStructure
     warnings: list[str]
 
@@ -297,6 +298,7 @@ class JsonExtractionInputLoader:
             warnings.append(f"document_key was not supplied; derived document_key={metadata['document_key']!r} from metadata.")
         book_structure = self._build_book_structure(extraction, metadata)
         page_extractions = self._build_page_extraction_records(extraction)
+        teacher_schedules = self._teacher_schedule_records(extraction)
         pages = self._build_pages(
             extraction,
             book_structure,
@@ -321,8 +323,91 @@ class JsonExtractionInputLoader:
             metadata=metadata,
             pages=pages,
             page_extractions=page_extractions,
+            teacher_schedules=teacher_schedules,
             book_structure=book_structure,
             warnings=warnings,
+        )
+
+    def _teacher_schedule_records(self, extraction: dict[str, Any]) -> list[dict[str, Any]]:
+        """Normalize optional real-teacher schedules without changing structural days.
+
+        Supported source shapes are intentionally additive:
+
+        * ``teacher_schedule``  - one schedule object on a chapter/section
+        * ``teacher_schedules`` - an array of schedule objects on a chapter/section
+
+        Production JSON may repeat the same chapter data under both ``chapters``
+        and ``section_index``.  We scan both and deduplicate by a stable
+        schedule key so the database receives one parent schedule row.
+        """
+        records: dict[str, dict[str, Any]] = {}
+
+        def visit(parent: dict[str, Any]) -> None:
+            if not parent:
+                return
+            parent_context = {
+                key: parent.get(key)
+                for key in (
+                    "chapter_number", "chapter_title", "unit_number", "unit_title",
+                    "section_number", "section_title", "lesson_title",
+                )
+                if parent.get(key) is not None
+            }
+
+            schedule_items: list[Any] = []
+            single = parent.get("teacher_schedule")
+            if isinstance(single, dict):
+                schedule_items.append(single)
+            schedule_items.extend(_as_list(parent.get("teacher_schedules")))
+
+            for item in schedule_items:
+                source = _as_dict(item)
+                if not source:
+                    continue
+                merged = dict(parent_context)
+                merged.update(source)
+                days = [dict(_as_dict(day)) for day in _as_list(source.get("days")) if _as_dict(day)]
+                merged["days"] = days
+
+                week_start_date = _clean_text_value(source.get("week_start_date"))
+                exercise = _clean_text_value(source.get("exercise"))
+                schedule_key = "|".join(
+                    [
+                        f"chapter:{_clean_text_value(merged.get('chapter_number')) or ''}",
+                        f"section:{_clean_text_value(merged.get('section_number')) or ''}",
+                        f"week:{week_start_date or ''}",
+                        f"exercise:{exercise or ''}",
+                    ]
+                )
+                merged["schedule_key"] = schedule_key
+                merged["source_payload"] = dict(source)
+                # ``chapters`` is the first branch in normal production JSON, so
+                # retain that copy when section_index contains the same schedule.
+                records.setdefault(schedule_key, merged)
+
+            for child_key in ("lessons", "sections", "content_units"):
+                for child in _as_list(parent.get(child_key)):
+                    child_raw = dict(_as_dict(child))
+                    if not child_raw:
+                        continue
+                    for key, value in parent_context.items():
+                        child_raw.setdefault(key, value)
+                    visit(child_raw)
+
+        # Scan chapters first so their schedule payload is authoritative when the
+        # same structure is mirrored under section_index.
+        for key in ("chapters", "sections", "content_units", "section_index"):
+            for item in _as_list(extraction.get(key)):
+                visit(_as_dict(item))
+
+        return sorted(
+            records.values(),
+            key=lambda row: (
+                str(row.get("week_start_date") or ""),
+                str(row.get("chapter_number") or ""),
+                str(row.get("section_number") or ""),
+                str(row.get("exercise") or ""),
+            ),
         )
 
     def _metadata_from_extraction(self, extraction: dict[str, Any]) -> dict[str, Any]:

@@ -307,9 +307,12 @@ class IngestService:
             book_structure = loaded.book_structure
             pages = loaded.pages
             page_extractions = loaded.page_extractions
+            teacher_schedules = loaded.teacher_schedules
             warnings.extend(loaded.warnings)
             pages_count = len(pages)
             page_extractions_count = len(page_extractions)
+            teacher_schedule_count = len(teacher_schedules)
+            teacher_schedule_day_count = sum(len(item.get("days") or []) for item in teacher_schedules)
             document_key = str(metadata.get("document_key") or "").strip()
             if not document_key:
                 raise ValueError("JSON ingestion requires document_key. Add metadata.document_key or document_key at the root.")
@@ -329,6 +332,12 @@ class IngestService:
                 json_path,
                 document_key,
             )
+            if teacher_schedule_count:
+                logger.info(
+                    "Loaded %s additive teacher schedules with %s schedule-day rows.",
+                    teacher_schedule_count,
+                    teacher_schedule_day_count,
+                )
 
             if not dry_run:
                 existing = self.repository.document_exists_by_document_key(document_key)
@@ -401,6 +410,8 @@ class IngestService:
                     "json_input_hash": json_input_hash,
                     "pages_loaded": pages_count,
                     "page_extractions_loaded": page_extractions_count,
+                    "teacher_schedules_loaded": teacher_schedule_count,
+                    "teacher_schedule_days_loaded": teacher_schedule_day_count,
                     "chunks_created": chunks_count,
                     "subsections_detected": len(book_structure.subsections),
                     "detected_language": detected_language,
@@ -443,6 +454,7 @@ class IngestService:
             document_id = self.repository.upsert_document_by_document_key(document)
             self.repository.insert_book_chapters(document_id, book_structure.chapters)
             self.repository.insert_book_subsections(document_id, book_structure.subsections)
+            self.repository.insert_teacher_schedules(document_id, teacher_schedules)
             self.repository.insert_page_extractions(document_id, page_extractions)
             pages_as_dicts = [asdict(p) for p in pages]
             self.repository.insert_pages(document_id, pages_as_dicts)
@@ -488,6 +500,8 @@ class IngestService:
                 "json_input_hash": json_input_hash,
                 "pages_loaded": pages_count,
                 "page_extractions_stored": page_extractions_count,
+                "teacher_schedules_stored": teacher_schedule_count,
+                "teacher_schedule_days_stored": teacher_schedule_day_count,
                 "chunks_created": chunks_count,
                 "embeddings_enabled": self.settings.generate_embeddings,
                 "embeddings_created": embeddings_count,

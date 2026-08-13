@@ -22,6 +22,46 @@ def _array(value: list[str] | None) -> list[str]:
     return value or []
 
 
+def _text_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _int_list(value: Any) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    result: list[int] = []
+    for item in value:
+        try:
+            result.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes", "y"}:
+        return True
+    if text in {"false", "0", "no", "n"}:
+        return False
+    return None
+
+
 def to_pgvector(values: list[float]) -> str:
     return "[" + ",".join(f"{float(v):.10g}" for v in values) + "]"
 
@@ -407,6 +447,149 @@ class RagRepository:
                 )
             with conn.cursor() as cur:
                 cur.executemany(sql, params)
+
+    def insert_teacher_schedules(self, document_id: str, schedules: list[dict[str, Any]]) -> None:
+        """Replace optional real-teacher weekly schedules for a document.
+
+        Teacher schedules are deliberately separate from ``embeddings_book_subsections``.
+        Existing structural days/subsections therefore remain untouched for every
+        old book, while Teacher Helper can query exact question-targeted page sets.
+        """
+        parent_known = {
+            "schedule_key", "chapter_number", "chapter_title", "unit_number", "unit_title",
+            "section_number", "section_title", "lesson_title", "week_start_date",
+            "schedule_source", "schedule_type", "exercise", "schedule_note",
+            "schedule_is_additive", "structural_subsections_unchanged",
+            "teacher_facing_page_system", "internal_page_system", "days", "source_payload",
+        }
+        day_known = {
+            "day", "weekday", "day_type", "activity", "topic", "teaching_book_page_ranges",
+            "exercise_book_pages", "exercise", "questions", "range_source", "source_input_warning",
+            "selected_book_pages", "selected_pdf_pages", "selected_page_count",
+            "selection_is_contiguous", "display_book_pages", "display_pdf_pages",
+            "selection_policy", "selected_pages_available",
+        }
+
+        parent_sql = """
+        INSERT INTO embeddings_teacher_schedules(
+            document_id, schedule_key, chapter_number, chapter_title, unit_number, unit_title,
+            section_number, section_title, lesson_title, week_start_date, schedule_source,
+            schedule_type, exercise, schedule_note, schedule_is_additive,
+            structural_subsections_unchanged, teacher_facing_page_system, internal_page_system,
+            metadata, source_payload
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s::jsonb, %s::jsonb
+        )
+        RETURNING id
+        """
+        day_sql = """
+        INSERT INTO embeddings_teacher_schedule_days(
+            teacher_schedule_id, document_id, day, weekday, day_type, activity, topic,
+            teaching_book_page_ranges, exercise_book_pages, exercise, questions, range_source,
+            source_input_warning, selected_book_pages, selected_pdf_pages, selected_page_count,
+            selection_is_contiguous, display_book_pages, display_pdf_pages, selection_policy,
+            selected_pages_available, metadata, source_payload
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb
+        )
+        """
+
+        with get_connection(self.database_url) as conn, conn.transaction():
+            # Deleting parent rows cascades to day rows. Run even when schedules
+            # is empty so a re-ingest can intentionally remove old schedule data.
+            conn.execute("DELETE FROM embeddings_teacher_schedules WHERE document_id=%s", (document_id,))
+            if not schedules:
+                return
+
+            for schedule in schedules:
+                raw = dict(schedule or {})
+                if not raw:
+                    continue
+                schedule_key = str(raw.get("schedule_key") or "").strip()
+                if not schedule_key:
+                    schedule_key = "|".join(
+                        [
+                            f"chapter:{raw.get('chapter_number') or ''}",
+                            f"section:{raw.get('section_number') or ''}",
+                            f"week:{raw.get('week_start_date') or ''}",
+                            f"exercise:{raw.get('exercise') or ''}",
+                        ]
+                    )
+                metadata = {key: value for key, value in raw.items() if key not in parent_known}
+                metadata.setdefault("source", "json_input")
+                metadata.setdefault("source_kind", "teacher_schedule")
+                source_payload = raw.get("source_payload") if isinstance(raw.get("source_payload"), dict) else {
+                    key: value for key, value in raw.items() if key not in {"schedule_key", "source_payload"}
+                }
+
+                with conn.cursor() as cur:
+                    row = cur.execute(
+                        parent_sql,
+                        (
+                            document_id,
+                            schedule_key,
+                            raw.get("chapter_number"),
+                            raw.get("chapter_title"),
+                            raw.get("unit_number"),
+                            raw.get("unit_title"),
+                            raw.get("section_number"),
+                            raw.get("section_title"),
+                            raw.get("lesson_title"),
+                            raw.get("week_start_date"),
+                            raw.get("schedule_source"),
+                            raw.get("schedule_type"),
+                            raw.get("exercise"),
+                            raw.get("schedule_note"),
+                            _bool_or_none(raw.get("schedule_is_additive")),
+                            _bool_or_none(raw.get("structural_subsections_unchanged")),
+                            raw.get("teacher_facing_page_system"),
+                            raw.get("internal_page_system"),
+                            _json(metadata),
+                            _json(source_payload),
+                        ),
+                    ).fetchone()
+                teacher_schedule_id = str(row[0])
+
+                day_params = []
+                for day_item in raw.get("days") or []:
+                    day = dict(day_item) if isinstance(day_item, dict) else {}
+                    if not day:
+                        continue
+                    day_metadata = {key: value for key, value in day.items() if key not in day_known}
+                    day_metadata.setdefault("source", "json_input")
+                    day_metadata.setdefault("source_kind", "teacher_schedule_day")
+                    day_params.append(
+                        (
+                            teacher_schedule_id,
+                            document_id,
+                            _int_or_none(day.get("day")),
+                            day.get("weekday"),
+                            day.get("day_type"),
+                            day.get("activity"),
+                            day.get("topic"),
+                            _json(day.get("teaching_book_page_ranges") if isinstance(day.get("teaching_book_page_ranges"), list) else []),
+                            _int_list(day.get("exercise_book_pages")),
+                            day.get("exercise") or raw.get("exercise"),
+                            _text_list(day.get("questions")),
+                            day.get("range_source"),
+                            day.get("source_input_warning"),
+                            _int_list(day.get("selected_book_pages")),
+                            _int_list(day.get("selected_pdf_pages")),
+                            _int_or_none(day.get("selected_page_count")),
+                            _bool_or_none(day.get("selection_is_contiguous")),
+                            day.get("display_book_pages"),
+                            day.get("display_pdf_pages"),
+                            day.get("selection_policy"),
+                            _bool_or_none(day.get("selected_pages_available")),
+                            _json(day_metadata),
+                            _json(day),
+                        )
+                    )
+                if day_params:
+                    with conn.cursor() as cur:
+                        cur.executemany(day_sql, day_params)
 
     def insert_page_extractions(self, document_id: str, page_extractions: list[dict[str, Any]]) -> None:
         """Persist extraction.page_extractions[] without dropping source fields.
@@ -862,6 +1045,8 @@ class RagRepository:
                d.document_key, d.file_name, d.file_hash, d.total_pages, d.total_words, d.total_tokens,
                (SELECT COUNT(*)::int FROM embeddings_chunks c WHERE c.document_id = d.id) AS chunks,
                (SELECT COUNT(*)::int FROM embeddings_book_subsections s WHERE s.document_id = d.id) AS subsections,
+               (SELECT COUNT(*)::int FROM embeddings_teacher_schedules ts WHERE ts.document_id = d.id) AS teacher_schedules,
+               (SELECT COUNT(*)::int FROM embeddings_teacher_schedule_days td WHERE td.document_id = d.id) AS teacher_schedule_days,
                (SELECT COUNT(*)::int FROM embeddings_page_extractions pe WHERE pe.document_id = d.id) AS page_extractions,
                (SELECT COUNT(*)::int FROM embeddings_page_extractions pe WHERE pe.document_id = d.id AND pe.include_in_embeddings) AS embedding_eligible_pages,
                (SELECT COUNT(*)::int FROM embeddings_vectors v WHERE v.document_id = d.id) AS embeddings,
@@ -879,6 +1064,102 @@ class RagRepository:
                 cur.execute(sql, (value,))
                 row = cur.fetchone()
                 return dict(row) if row else None
+
+    def list_teacher_schedule_days(
+        self,
+        *,
+        document_id: str | None = None,
+        document_key: str | None = None,
+        chapter_number: str | None = None,
+        chapter_title: str | None = None,
+        section_number: str | None = None,
+        section_title: str | None = None,
+        week_start_date: str | None = None,
+        exercise: str | None = None,
+        weekday: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return teacher-facing weekly schedule days with exact selected pages."""
+        clauses, params = self._document_join_filter("ts", document_id=document_id, document_key=document_key)
+        exact_filters = {
+            "chapter_number": chapter_number,
+            "section_number": section_number,
+            "exercise": exercise,
+        }
+        for column, value in exact_filters.items():
+            if value is not None:
+                clauses.append(f"ts.{column} = %s")
+                params.append(value)
+        text_filters = {
+            "chapter_title": chapter_title,
+            "section_title": section_title,
+        }
+        for column, value in text_filters.items():
+            if value:
+                clauses.append(f"LOWER(ts.{column}) = LOWER(%s)")
+                params.append(value)
+        if week_start_date:
+            clauses.append("ts.week_start_date = %s::date")
+            params.append(week_start_date)
+        if weekday:
+            clauses.append("LOWER(td.weekday) = LOWER(%s)")
+            params.append(weekday)
+
+        sql = f"""
+        SELECT d.id::text AS document_id,
+               d.document_key,
+               d.book_title,
+               d.school_name,
+               d.class_name,
+               d.subject,
+               d.grade,
+               ts.id::text AS teacher_schedule_id,
+               ts.schedule_key,
+               ts.chapter_number,
+               ts.chapter_title,
+               ts.unit_number,
+               ts.unit_title,
+               ts.section_number,
+               ts.section_title,
+               ts.lesson_title,
+               ts.week_start_date,
+               ts.schedule_source,
+               ts.schedule_type,
+               ts.exercise,
+               ts.schedule_note,
+               ts.schedule_is_additive,
+               ts.structural_subsections_unchanged,
+               ts.teacher_facing_page_system,
+               ts.internal_page_system,
+               td.id::text AS teacher_schedule_day_id,
+               td.day,
+               td.weekday,
+               td.day_type,
+               td.activity,
+               td.topic,
+               td.teaching_book_page_ranges,
+               td.exercise_book_pages,
+               td.questions,
+               td.range_source,
+               td.source_input_warning,
+               td.selected_book_pages,
+               td.selected_pdf_pages,
+               td.selected_page_count,
+               td.selection_is_contiguous,
+               td.display_book_pages,
+               td.display_pdf_pages,
+               td.selection_policy,
+               td.selected_pages_available,
+               td.metadata
+        FROM embeddings_teacher_schedules ts
+        JOIN embeddings_teacher_schedule_days td ON td.teacher_schedule_id = ts.id
+        JOIN embeddings_documents d ON d.id = ts.document_id
+        WHERE {' AND '.join(clauses)}
+        ORDER BY ts.week_start_date, COALESCE(td.day, 2147483647), td.weekday
+        """
+        with get_connection(self.database_url) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(sql, params)
+                return [dict(row) for row in cur.fetchall()]
 
     def vector_search(self, query_embedding: list[float], filters: dict[str, Any], limit: int) -> list[dict[str, Any]]:
         where, params = self._build_filter_sql(filters, table_alias="c")
