@@ -26,6 +26,141 @@ def to_pgvector(values: list[float]) -> str:
     return "[" + ",".join(f"{float(v):.10g}" for v in values) + "]"
 
 
+def _chapter_rows_for_db(chapters: list[BookChapter]) -> list[BookChapter]:
+    """Return the parent rows that belong in ``embeddings_book_chapters``.
+
+    Some production JSONs expose a fine-grained ``section_index`` where several
+    prose/poem sections share the same real TOC chapter number/title.  Those
+    section rows are useful to the in-memory ``ChapterResolver`` (so chunks and
+    raw pages keep section-level metadata), but inserting every one of them into
+    ``embeddings_book_chapters`` makes a chapter menu repeat the same chapter.
+
+    Collapse only *clearly hierarchical* repeated chapter groups:
+      * same non-empty chapter_number
+      * same non-empty chapter_title
+      * more than one distinct child section
+
+    Books whose top level is section-based (for example records with no
+    chapter_number/chapter_title) and normal one-row-per-chapter books are left
+    unchanged. This keeps the loader generic across the existing JSON formats.
+    """
+    if not chapters:
+        return []
+
+    grouped: dict[str, list[BookChapter]] = {}
+    for chapter in chapters:
+        number = str(chapter.chapter_number or "").strip()
+        title = str(chapter.chapter_title or "").strip()
+        if number and title:
+            grouped.setdefault(number, []).append(chapter)
+
+    repeated_hierarchy_detected = False
+    for number, group in grouped.items():
+        if len(group) <= 1:
+            continue
+        titles = {str(item.chapter_title or "").strip() for item in group if str(item.chapter_title or "").strip()}
+        child_keys = {
+            str(item.section_number or item.section_title or item.lesson_title or "").strip()
+            for item in group
+            if str(item.section_number or item.section_title or item.lesson_title or "").strip()
+        }
+        if len(titles) == 1 and len(child_keys) > 1:
+            repeated_hierarchy_detected = True
+            break
+
+    if not repeated_hierarchy_detected:
+        return chapters
+
+    # Once the input is proven to be a chapter->section hierarchy, normalize every
+    # real chapter to one parent row, including chapters that happen to have only
+    # one child section (for example First Flight Chapter 9, The Proposal).
+    collapsible: dict[str, list[BookChapter]] = {}
+    for number, group in grouped.items():
+        titles = {str(item.chapter_title or "").strip() for item in group if str(item.chapter_title or "").strip()}
+        has_child_structure = any(item.section_number or item.section_title or item.lesson_title for item in group)
+        if len(titles) == 1 and has_child_structure:
+            collapsible[number] = group
+
+    if not collapsible:
+        return chapters
+
+    emitted: set[str] = set()
+    result: list[BookChapter] = []
+    for chapter in chapters:
+        number = str(chapter.chapter_number or "").strip()
+        group = collapsible.get(number)
+        if not group:
+            result.append(chapter)
+            continue
+        if number in emitted:
+            continue
+        emitted.add(number)
+
+        ordered = sorted(
+            group,
+            key=lambda item: (
+                item.pdf_start_page if item.pdf_start_page is not None else 10**9,
+                item.section_number or "",
+                item.section_title or "",
+            ),
+        )
+        first = ordered[0]
+        last = max(
+            ordered,
+            key=lambda item: item.pdf_end_page if item.pdf_end_page is not None else -1,
+        )
+        pdf_starts = [item.pdf_start_page for item in ordered if item.pdf_start_page is not None]
+        pdf_ends = [item.pdf_end_page for item in ordered if item.pdf_end_page is not None]
+
+        child_sections = [
+            {
+                "section_number": item.section_number,
+                "section_title": item.section_title,
+                "lesson_title": item.lesson_title,
+                "structure_type": item.structure_type,
+                "printed_start_page": item.printed_start_page,
+                "printed_end_page": item.printed_end_page,
+                "pdf_start_page": item.pdf_start_page,
+                "pdf_end_page": item.pdf_end_page,
+            }
+            for item in ordered
+        ]
+        metadata = dict(first.metadata or {})
+        metadata.update(
+            {
+                "collapsed_from_child_sections": True,
+                "child_section_count": len(ordered),
+                "child_sections": child_sections,
+            }
+        )
+
+        result.append(
+            BookChapter(
+                chapter_number=first.chapter_number,
+                chapter_title=first.chapter_title,
+                unit_number=first.unit_number,
+                unit_title=first.unit_title,
+                section_number=None,
+                section_title=None,
+                lesson_title=None,
+                section_key=first.chapter_number,
+                structure_type="chapter",
+                printed_start_page=first.printed_start_page,
+                printed_end_page=last.printed_end_page,
+                pdf_start_page=min(pdf_starts) if pdf_starts else first.pdf_start_page,
+                pdf_end_page=max(pdf_ends) if pdf_ends else last.pdf_end_page,
+                confidence=min(
+                    [item.confidence for item in ordered if item.confidence is not None],
+                    default=first.confidence,
+                ),
+                detected_by="json_input_parent_chapter_collapse",
+                metadata=metadata,
+            )
+        )
+
+    return result
+
+
 class RagRepository:
     def __init__(self, database_url: str) -> None:
         self.database_url = database_url
@@ -145,6 +280,14 @@ class RagRepository:
     def insert_book_chapters(self, document_id: str, chapters: list[BookChapter]) -> None:
         if not chapters:
             return
+        db_chapters = _chapter_rows_for_db(chapters)
+        if len(db_chapters) != len(chapters):
+            logger.info(
+                "Collapsed %s structure rows to %s parent chapter rows for embeddings_book_chapters; "
+                "section-level structures remain available to chunk/page resolution and subsection rows.",
+                len(chapters),
+                len(db_chapters),
+            )
         sql = """
         INSERT INTO embeddings_book_chapters(
             document_id, chapter_number, chapter_title, unit_number, unit_title,
@@ -189,7 +332,7 @@ class RagRepository:
                 c.confidence,
                 _json(c.metadata or {}),
             )
-            for c in chapters
+            for c in db_chapters
             if c.display_title
         ]
         with get_connection(self.database_url) as conn, conn.transaction():

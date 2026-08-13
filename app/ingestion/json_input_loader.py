@@ -175,6 +175,33 @@ def _dict_text_value(raw: dict[str, Any], dict_key: str, child_key: str) -> str 
     return _text_or_none(nested.get(child_key))
 
 
+def _pdf_start_page(raw: dict[str, Any]) -> int | None:
+    """Return the physical PDF start page, preferring explicit PDF fields.
+
+    Newer production JSONs intentionally use generic ``start_page`` / ``end_page``
+    as teacher-facing *book* pages. Older JSONs sometimes used those generic
+    fields as physical PDF pages. Therefore explicit PDF aliases must always win,
+    while ``start_page`` remains a backward-compatible fallback.
+    """
+    return (
+        _int_or_none(raw.get("start_pdf_page"))
+        or _int_or_none(raw.get("pdf_start_page"))
+        or _dict_int_value(raw, "pdf_pages", "start")
+        or _int_or_none(raw.get("start_page"))
+    )
+
+
+def _pdf_end_page(raw: dict[str, Any]) -> int | None:
+    """Return the physical PDF end page, preferring explicit PDF fields."""
+    return (
+        _int_or_none(raw.get("end_pdf_page"))
+        or _int_or_none(raw.get("pdf_end_page"))
+        or _dict_int_value(raw, "pdf_pages", "end")
+        or _int_or_none(raw.get("end_page"))
+        or _pdf_start_page(raw)
+    )
+
+
 def _page_label_range(start: str | None, end: str | None) -> list[str]:
     if start is None:
         return []
@@ -412,8 +439,8 @@ class JsonExtractionInputLoader:
                             structure_type=_clean_text_value(child_raw.get("chapter_type") or child_raw.get("structure_type") or raw.get("chapter_type") or raw.get("structure_type")) or ("section" if section_title else "chapter"),
                             printed_start_page=_text_or_none(child_raw.get("printed_start_page") or child_raw.get("start_printed_page")),
                             printed_end_page=_text_or_none(child_raw.get("printed_end_page") or child_raw.get("end_printed_page")),
-                            pdf_start_page=_int_or_none(child_raw.get("start_page") or child_raw.get("pdf_start_page")),
-                            pdf_end_page=_int_or_none(child_raw.get("end_page") or child_raw.get("pdf_end_page")),
+                            pdf_start_page=_pdf_start_page(child_raw),
+                            pdf_end_page=_pdf_end_page(child_raw),
                             confidence=_float_or_none(child_raw.get("confidence") or raw.get("confidence")) or 1.0,
                             detected_by="json_input",
                             metadata=self._extra_structure_metadata(child_raw),
@@ -435,8 +462,8 @@ class JsonExtractionInputLoader:
                     structure_type=_clean_text_value(raw.get("chapter_type") or raw.get("structure_type")) or "chapter",
                     printed_start_page=_text_or_none(raw.get("printed_start_page") or raw.get("start_printed_page")),
                     printed_end_page=_text_or_none(raw.get("printed_end_page") or raw.get("end_printed_page")),
-                    pdf_start_page=_int_or_none(raw.get("start_page") or raw.get("pdf_start_page")),
-                    pdf_end_page=_int_or_none(raw.get("end_page") or raw.get("pdf_end_page")),
+                    pdf_start_page=_pdf_start_page(raw),
+                    pdf_end_page=_pdf_end_page(raw),
                     confidence=_float_or_none(raw.get("confidence")) or 1.0,
                     detected_by="json_input",
                     metadata=self._extra_structure_metadata(raw),
@@ -476,8 +503,8 @@ class JsonExtractionInputLoader:
                             structure_type=_clean_text_value(lesson_raw.get("chapter_type") or lesson_raw.get("structure_type") or lesson_raw.get("lesson_type") or raw.get("chapter_type") or raw.get("structure_type")) or "section",
                             printed_start_page=_text_or_none(lesson_raw.get("printed_start_page") or lesson_raw.get("start_printed_page")),
                             printed_end_page=_text_or_none(lesson_raw.get("printed_end_page") or lesson_raw.get("end_printed_page")),
-                            pdf_start_page=_int_or_none(lesson_raw.get("start_page") or lesson_raw.get("pdf_start_page")),
-                            pdf_end_page=_int_or_none(lesson_raw.get("end_page") or lesson_raw.get("pdf_end_page")),
+                            pdf_start_page=_pdf_start_page(lesson_raw),
+                            pdf_end_page=_pdf_end_page(lesson_raw),
                             confidence=_float_or_none(lesson_raw.get("confidence") or raw.get("confidence")) or 1.0,
                             detected_by="json_input",
                             metadata=self._extra_structure_metadata(lesson_raw),
@@ -500,8 +527,8 @@ class JsonExtractionInputLoader:
                     structure_type=_clean_text_value(raw.get("chapter_type") or raw.get("structure_type") or raw.get("lesson_type")) or "section",
                     printed_start_page=_text_or_none(raw.get("printed_start_page") or raw.get("start_printed_page")),
                     printed_end_page=_text_or_none(raw.get("printed_end_page") or raw.get("end_printed_page")),
-                    pdf_start_page=_int_or_none(raw.get("start_page") or raw.get("pdf_start_page")),
-                    pdf_end_page=_int_or_none(raw.get("end_page") or raw.get("pdf_end_page")),
+                    pdf_start_page=_pdf_start_page(raw),
+                    pdf_end_page=_pdf_end_page(raw),
                     confidence=_float_or_none(raw.get("confidence")) or 1.0,
                     detected_by="json_input",
                     metadata=self._extra_structure_metadata(raw),
@@ -587,19 +614,8 @@ class JsonExtractionInputLoader:
         if not (title or number):
             return None
 
-        start = (
-            _int_or_none(raw.get("start_page"))
-            or _int_or_none(raw.get("start_pdf_page"))
-            or _int_or_none(raw.get("pdf_start_page"))
-            or _dict_int_value(raw, "pdf_pages", "start")
-        )
-        end = (
-            _int_or_none(raw.get("end_page"))
-            or _int_or_none(raw.get("end_pdf_page"))
-            or _int_or_none(raw.get("pdf_end_page"))
-            or _dict_int_value(raw, "pdf_pages", "end")
-            or start
-        )
+        start = _pdf_start_page(raw)
+        end = _pdf_end_page(raw)
         printed_start = (
             _text_or_none(raw.get("printed_start_page"))
             or _text_or_none(raw.get("start_printed_page"))
@@ -975,8 +991,8 @@ class JsonExtractionInputLoader:
         chapter_title = _clean_text_value(raw.get("chapter_title") or raw.get("title") or raw.get("name"))
         direct_text = _text_fields(raw)
         if direct_text:
-            start = _int_or_none(raw.get("start_page") or raw.get("pdf_start_page"))
-            end = _int_or_none(raw.get("end_page") or raw.get("pdf_end_page"))
+            start = _pdf_start_page(raw)
+            end = _pdf_end_page(raw)
             self._add_text_to_pages(
                 page_texts,
                 page_metadata,
@@ -1032,8 +1048,8 @@ class JsonExtractionInputLoader:
         text = _text_fields(raw)
         if not text:
             return
-        start = _int_or_none(raw.get("start_page") or raw.get("pdf_start_page"))
-        end = _int_or_none(raw.get("end_page") or raw.get("pdf_end_page"))
+        start = _pdf_start_page(raw)
+        end = _pdf_end_page(raw)
         page_numbers = _as_list(raw.get("page_numbers"))
         parsed_page_numbers = [_int_or_none(p) for p in page_numbers]
         parsed_page_numbers = [p for p in parsed_page_numbers if p is not None]
